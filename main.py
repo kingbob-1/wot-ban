@@ -3,7 +3,8 @@
 
 用法
 ----
-    python main.py                 # 启动 GUI（当前为骨架占位窗口，P3 实现完整界面）
+    python main.py                 # 启动 GUI（PySide6 主窗口）
+    python main.py --mock          # 用内置演示数据启动（数据层未就绪时自动启用）
     python main.py --init-db       # 初始化 / 升级本地 SQLite 数据库
     python main.py --version       # 打印版本后退出
     python main.py --config PATH   # 使用指定配置文件
@@ -54,6 +55,7 @@ def parse_args(argv: list) -> argparse.Namespace:
     )
     parser.add_argument("--version", action="store_true", help="打印版本后退出")
     parser.add_argument("--init-db", action="store_true", help="初始化 / 升级本地 SQLite 数据库后退出")
+    parser.add_argument("--mock", action="store_true", help="使用内置演示数据启动 GUI（数据模块未就绪时自动启用）")
     parser.add_argument("--config", default=None, help="指定配置文件路径（默认项目内 config.json）")
     return parser.parse_args(argv)
 
@@ -82,12 +84,11 @@ def command_init_db(cfg) -> int:
     return 0
 
 
-def command_launch_gui(cfg) -> int:
-    """默认行为：启动 GUI。P3 之前的占位窗口（完整界面见 src/ui）。"""
+def command_launch_gui(cfg, mock: bool = False) -> int:
+    """默认行为：启动 PySide6 主窗口（完整界面见 src/ui）。"""
     logger = get_logger("gui")
     try:
-        from PySide6.QtCore import Qt
-        from PySide6.QtWidgets import QApplication, QLabel, QMainWindow
+        from PySide6.QtWidgets import QApplication  # noqa: F401
     except ImportError as exc:
         print("[error] 缺少 PySide6：%s" % exc)
         print(
@@ -96,27 +97,25 @@ def command_launch_gui(cfg) -> int:
         )
         return 2
 
-    app = QApplication.instance() or QApplication(sys.argv)
-    app.setApplicationName(cfg.app_name)
-    window = QMainWindow()
-    window.setWindowTitle("%s v%s" % (cfg.app_name, cfg.app_version))
-    window.resize(cfg.window_width, cfg.window_height)
-    text = (
-        "<h2>%s</h2>"
-        "<p>版本 %s · GUI 骨架占位（P3 实现完整界面）</p>"
-        "<p>录像目录: %s</p>"
-        "<p>名单库: %s</p>"
-        "<hr>"
-        "<p>本工具仅呈现官方公开的历史封禁记录，<b>历史封禁不代表当前违规</b>；"
-        "数据非官方口径，仅供参考，不得用于挂人 / 骚扰。</p>"
-    ) % (cfg.app_name, cfg.app_version, cfg.replay_dir, cfg.db_path)
-    label = QLabel(text)
-    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    label.setWordWrap(True)
-    window.setCentralWidget(label)
-    window.show()
-    logger.info("GUI 占位窗口已启动")
-    return app.exec()
+    from src.ui.main_window import run_app
+
+    logger.info("GUI 主窗口启动（mock=%s）", mock)
+    code = run_app(cfg, mock=mock)
+    # Windows + PySide6 6.12：app.exec() 返回后跳过解释器退出阶段的 Qt 全局析构，
+    # 否则偶发 Qt6Core.dll 崩溃（0xc0000409 BEX64）导致系统弹「python 已停止工作」。
+    try:
+        import logging
+
+        logging.shutdown()
+    except Exception:  # noqa: BLE001
+        pass
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if stream is not None:
+                stream.flush()
+        except Exception:  # noqa: BLE001
+            pass
+    os._exit(0 if code == 0 else code)
 
 
 def main(argv: list) -> int:
@@ -139,7 +138,7 @@ def main(argv: list) -> int:
         if args.init_db:
             code = command_init_db(cfg)
         else:
-            code = command_launch_gui(cfg)
+            code = command_launch_gui(cfg, mock=args.mock)
     except Exception:  # noqa: BLE001 - 顶层兜底：未捕获异常必须落日志并给中文提示
         logger.exception("运行过程中出现未捕获异常")
         print("[error] 运行失败，详细信息见 log 目录中的日志文件")

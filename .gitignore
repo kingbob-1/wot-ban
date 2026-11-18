@@ -24,6 +24,21 @@ build/
 dist/
 *.zip
 
+# 内部开发/审计文档（计划 §11 Q1：研究资料、逆向报告、审计报告仅留本地，
+# 不随公开仓库发布；公开仓库只放 README / 使用说明 / 第三方许可 / 截图）
+docs/P0-*.md
+docs/P1-*.md
+docs/P2-*.md
+docs/P2.5-*.md
+docs/P3-*.md
+docs/QA-*.md
+
+# QA 临时产物（隔离数据库副本、测试证据、驱动脚本；体积大且含本机痕迹）
+tmp-qa/
+
+# 演示/mock 截图仅本地保留（公开仓库只放 README 引用的 real_* 真实数据截图）
+docs/shots/0*.png
+
 # IDE / OS
 .idea/
 .vscode/
