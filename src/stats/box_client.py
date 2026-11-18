@@ -44,7 +44,8 @@ from typing import Any, Optional
 try:
     import requests
 except ImportError:  # pragma: no cover - 共享 runtime 已装 requests
-    print("需要 requests：..\\runtime\\python.exe -m pip install requests",
+    print("需要 requests 依赖：请先执行 python -m pip install requests"
+          "（本工作区共享环境也可用 runtime\\python.exe -m pip install requests）",
           file=sys.stderr)
     raise
 

@@ -4,6 +4,7 @@
 全部用假 session / 注入 sleep，不发真实网络请求。
 """
 import json
+import re
 import sys
 import time
 from datetime import datetime, timedelta
@@ -507,6 +508,15 @@ def test_parse_index_html_real_raw_fixture(tmp_path):
         assert stats.source == "box_index"
     finally:
         conn.close()
+
+
+def test_user_facing_messages_have_no_local_drive_paths():
+    """公开版用户提示不得出现本机绝对路径（QA D3）：依赖提示用通用 python 表述。"""
+    source = (PROJECT_ROOT / "src" / "stats" / "box_client.py").read_text(encoding="utf-8")
+    assert not re.search(r"[A-Za-z]:\\", source), "box_client.py 含本机盘符绝对路径"
+    assert "G:\\" not in source and "F:\\" not in source
+    assert "python -m pip install requests" in source
+    assert r"runtime\\python.exe" in source  # 相对说法可保留
 
 
 def main(argv):

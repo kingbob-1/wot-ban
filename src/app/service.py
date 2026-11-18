@@ -139,6 +139,51 @@ class DataStatus:
 
 
 @dataclass
+class EnvironmentInfo:
+    """本机环境探测结果（v0.2：游戏目录 / 录像目录 / 我的账号）。
+
+    数据来源：T15 ``src.detect.detect_environment()``（注册表卸载项 + 最新录像 meta）；
+    模块未就绪或探测失败时降级为配置值 + ``detected=False``，界面据此给出手动选择入口。
+    """
+
+    game_dir: str = ""
+    replay_dir: str = ""
+    account_id: Optional[int] = None
+    account_name: str = ""
+    game_dir_source: str = ""
+    account_source: str = ""
+    last_battle_time: str = ""
+    detected: bool = False
+    message: str = ""
+
+    @property
+    def game_dir_text(self) -> str:
+        """游戏目录展示文案。"""
+        return self.game_dir or "未检测到游戏目录"
+
+    @property
+    def account_text(self) -> str:
+        """我的账号展示文案。"""
+        if self.account_name and self.account_id:
+            return "%s（%s）" % (self.account_name, self.account_id)
+        if self.account_name:
+            return str(self.account_name)
+        if self.account_id:
+            return "（ID %s）" % self.account_id
+        return "未检测到账号"
+
+    @property
+    def source_text(self) -> str:
+        """来源展示（游戏目录来源 / 账号来源）。"""
+        parts = []
+        if self.game_dir_source:
+            parts.append("游戏目录：%s" % self.game_dir_source)
+        if self.account_source:
+            parts.append("账号：%s" % self.account_source)
+        return " ｜ ".join(parts)
+
+
+@dataclass
 class ReplayQueryResult:
     """单局查询结果：录像详情 + 匹配行 + 汇总。"""
 
@@ -395,6 +440,7 @@ class AppService:
         self._last_box_request_ts = 0.0
         self._mock_replays = mock_data.build_replays() if self._mock else []
         self._mock_status = mock_data.build_data_status() if self._mock else None
+        self._environment: Optional[EnvironmentInfo] = None
 
     # ------------------------------------------------------------ 能力探测
     @property
@@ -434,6 +480,166 @@ class AppService:
             return "演示模式：使用内置 mock 数据（未读取本地名单库与真实录像）"
         missing = self.missing_modules()
         return "数据模块未就绪，当前使用内置演示数据（mock）：%s" % "、".join(missing)
+
+    # ------------------------------------------------------------ 本机环境（v0.2）
+    def _load_detect_module(self) -> Any:
+        """惰性加载 T15 环境探测模块（``src/detect.py``；测试可 monkeypatch 本方法）。"""
+        return _load_module("src.detect", "环境探测（T15 src/detect.py）")
+
+    def _replay_dir_path(self) -> Optional[Path]:
+        """录像目录（``cfg.replay_dir`` 可能为 None / 不存在）。"""
+        value = getattr(self.cfg, "replay_dir", None)
+        if not value:
+            return None
+        return Path(value)
+
+    def replay_dir_available(self) -> bool:
+        """录像目录是否可用（存在且为目录；mock 模式恒可用）。"""
+        if self._mock:
+            return True
+        replay_dir = self._replay_dir_path()
+        return bool(replay_dir is not None and replay_dir.is_dir())
+
+    def _latest_battle_time(self) -> str:
+        """最近对局时间：优先录像目录最新文件 mtime（不依赖 DB，避免启动期连接竞争），
+        录像目录不可用时降级查询录像索引库 MAX(battle_time)。"""
+        replay_dir = self._replay_dir_path()
+        if replay_dir is not None and replay_dir.is_dir():
+            try:
+                files = list(replay_dir.glob("*.wotreplay"))
+                if files:
+                    newest = max(files, key=lambda item: item.stat().st_mtime)
+                    return datetime.fromtimestamp(newest.stat().st_mtime).astimezone().isoformat(
+                        timespec="seconds"
+                    )
+            except OSError:
+                pass
+        try:
+            conn = self._thread_conn()
+            row = conn.execute("SELECT MAX(battle_time) AS latest FROM replays").fetchone()
+            if row is not None and row["latest"]:
+                return str(row["latest"])
+        except Exception:  # noqa: BLE001 - 索引库不可用时降级
+            pass
+        return ""
+
+    def _synthetic_environment(self) -> EnvironmentInfo:
+        """探测不可用时的降级环境（只读配置，不写死任何机器路径）。"""
+        replay_dir = self._replay_dir_path()
+        game_dir = getattr(self.cfg, "game_dir", None)
+        game_text = str(game_dir) if game_dir else ""
+        replay_text = str(replay_dir) if replay_dir is not None else ""
+        if not game_text and replay_text:
+            game_text = str(Path(replay_text).parent)
+        return EnvironmentInfo(
+            game_dir=game_text,
+            replay_dir=replay_text,
+            last_battle_time=self._latest_battle_time(),
+            detected=bool(game_text or replay_text),
+            message="尚未检测到游戏环境：请点击「重新检测」或「手动选择游戏目录」",
+        )
+
+    def _normalize_environment(self, raw: Any) -> EnvironmentInfo:
+        """把 T15 探测结果（dataclass / dict / 对象）归一为 EnvironmentInfo。"""
+        if isinstance(raw, EnvironmentInfo):
+            env = raw
+        elif isinstance(raw, dict):
+            known = {name for name in EnvironmentInfo.__dataclass_fields__}
+            env = EnvironmentInfo(**{key: value for key, value in raw.items() if key in known})
+        else:
+            env = EnvironmentInfo(
+                game_dir=str(getattr(raw, "game_dir", "") or ""),
+                replay_dir=str(getattr(raw, "replay_dir", "") or ""),
+                account_id=getattr(raw, "account_id", None),
+                account_name=str(getattr(raw, "account_name", "") or ""),
+                game_dir_source=str(getattr(raw, "game_dir_source", "") or ""),
+                account_source=str(getattr(raw, "account_source", "") or ""),
+                last_battle_time=str(getattr(raw, "last_battle_time", "") or ""),
+                detected=bool(getattr(raw, "detected", False)),
+                message=str(getattr(raw, "message", "") or ""),
+            )
+        if not env.replay_dir and env.game_dir:
+            candidate = Path(env.game_dir) / "replays"
+            if candidate.is_dir():
+                env.replay_dir = str(candidate)
+        if not env.last_battle_time:
+            env.last_battle_time = self._latest_battle_time()
+        env.detected = bool(env.game_dir or env.replay_dir)
+        if not env.message:
+            env.message = "已检测到游戏环境" if env.detected else "未检测到游戏目录 / 账号"
+        return env
+
+    def detect_environment(self, apply: bool = True) -> EnvironmentInfo:
+        """探测本机游戏目录与我的账号（注册表 + 最新录像 meta）。
+
+        模块未就绪 / 探测失败时不抛异常：返回 ``detected=False`` 的降级结果，
+        界面据此显示「未检测到…」与「重新检测 / 手动选择游戏目录」按钮。
+        """
+        if self._mock:
+            env = self._normalize_environment(mock_data.build_mock_environment())
+            env.message = "演示环境（mock）：未读取本机注册表与真实录像"
+            self._environment = env
+            return env
+        try:
+            module = self._load_detect_module()
+            func = getattr(module, "detect_environment", None)
+            if not callable(func):
+                raise ServiceError("环境探测模块接口不匹配：src.detect 未提供 detect_environment()")
+            raw = _call_adaptive(func, cfg=self.cfg, config=self.cfg)
+            env = self._normalize_environment(raw)
+            if apply:
+                apply_func = getattr(module, "apply_to_config", None)
+                if callable(apply_func):
+                    _call_adaptive(apply_func, cfg=self.cfg, config=self.cfg, env=raw, detected=raw)
+            self._environment = env
+            return env
+        except ServiceError as exc:
+            env = self._synthetic_environment()
+            env.message = "%s；请点击「重新检测」或「手动选择游戏目录」" % exc
+            self._environment = env
+            return env
+        except Exception as exc:  # noqa: BLE001 - 探测失败必须降级，不能影响主界面
+            env = self._synthetic_environment()
+            env.message = "环境探测失败：%s；请点击「重新检测」或「手动选择游戏目录」" % exc
+            self._environment = env
+            return env
+
+    def select_game_dir(self, game_dir: str) -> EnvironmentInfo:
+        """手动选择游戏目录：更新配置 -> save_config 记忆 -> 重新探测。"""
+        target = Path(game_dir).expanduser()
+        replay_dir = target / "replays" if (target / "replays").is_dir() else target
+        setattr(self.cfg, "game_dir", target)
+        setattr(self.cfg, "replay_dir", replay_dir)
+        saved_path = ""
+        try:
+            try:
+                from ..config import save_config
+            except ImportError:
+                from src.config import save_config
+            saved_path = str(save_config(self.cfg))
+        except Exception:  # noqa: BLE001 - 保存失败时仅本次有效
+            saved_path = ""
+        env = self.detect_environment(apply=False)
+        if not env.detected:
+            env = EnvironmentInfo(
+                game_dir=str(target),
+                replay_dir=str(replay_dir),
+                game_dir_source="手动选择",
+                last_battle_time=self._latest_battle_time(),
+                detected=True,
+                message="已手动选择游戏目录：%s" % target,
+            )
+        env.message = (env.message + "；" if env.message else "") + (
+            "已保存到 config.local.json：%s" % saved_path if saved_path else "配置保存失败，仅本次有效"
+        )
+        self._environment = env
+        return env
+
+    def current_environment(self) -> EnvironmentInfo:
+        """当前环境（未探测过则探测一次）。"""
+        if self._environment is None:
+            return self.detect_environment()
+        return self._environment
 
     # ------------------------------------------------------------ 连接 / 索引
     def _thread_conn(self) -> Any:
@@ -765,6 +971,11 @@ class AppService:
         """
         if self._mock:
             return self._mock_scan(mode, manual_path, progress_cb)
+        if mode != "file" and not self.replay_dir_available():
+            raise ServiceError(
+                "未检测到录像目录：请点击「重新检测」或「手动选择游戏目录」（当前配置：%s）"
+                % (getattr(self.cfg, "replay_dir", None) or "未设置")
+            )
         scan_mode = "all" if mode == "all" else "recent"
         window_days = None if mode == "all" else int(days if days is not None else self.cfg.default_scan_days)
         if mode == "file" and manual_path:
@@ -822,7 +1033,8 @@ class AppService:
         cancel_cb: Optional[Callable[[], bool]],
     ) -> list:
         module = _load_module("src.replay.scanner", CAPABILITY_MODULES["scanner"][1])
-        root = manual_path or str(self.cfg.replay_dir)
+        replay_dir = self._replay_dir_path()
+        root = manual_path or (str(replay_dir) if replay_dir is not None else "")
         kwargs = {
             # T3 scanner.scan_replays 实际签名
             "config": self.cfg,

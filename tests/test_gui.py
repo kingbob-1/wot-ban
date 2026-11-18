@@ -298,6 +298,104 @@ def test_worker_lifecycle_repeated_operations(qapp):
     service.dispose()
 
 
+def test_environment_auto_display_with_fake_detect(qapp, monkeypatch, tmp_path):
+    """v0.2：启动即显示环境（mock 合成路径）；fake detect 验证 T15 契约接线。"""
+    from types import SimpleNamespace
+
+    from src.ui.main_window import MainWindow
+
+    # 1) mock 服务：合成环境（不依赖本机真实路径），启动即显示
+    service = make_mock_service()
+    window = MainWindow(service)
+    window.show()
+    qapp.processEvents()
+    window.auto_start()
+    assert wait_until(qapp, lambda: "检测中" not in window.env_game_label.text(), timeout_s=15)
+    assert "游戏目录：" in window.env_game_label.text()
+    assert "wot-ban-demo" in window.env_game_label.text()
+    assert "演示玩家" in window.env_account_label.text()
+    assert window.redetect_button.isEnabled() and window.manual_game_button.isEnabled()
+    window.close()
+    service.dispose()
+
+    # 2) 真实模式 + fake detect 模块：验证字段映射与录像目录缺失判定
+    fake_module = SimpleNamespace(
+        detect_environment=lambda **kwargs: SimpleNamespace(
+            game_dir="X:/FakeGame",
+            replay_dir="X:/FakeGame/replays",
+            account_id=1234567,
+            account_name="fake_user",
+            game_dir_source="registry",
+            account_source="replay_meta",
+        ),
+        apply_to_config=lambda *args, **kwargs: None,
+    )
+    real_service = make_real_service(tmp_path / "env-detect.db")
+    monkeypatch.setattr(real_service, "_load_detect_module", lambda: fake_module)
+    env = real_service.detect_environment(apply=True)
+    assert env.game_dir == "X:/FakeGame"
+    assert env.replay_dir == "X:/FakeGame/replays"
+    assert env.account_name == "fake_user" and env.account_id == 1234567
+    assert env.game_dir_source == "registry" and env.account_source == "replay_meta"
+    assert env.detected is True
+    assert real_service.replay_dir_available() is False  # 合成目录不存在 → 禁用扫描
+    real_service.dispose()
+
+
+def test_application_version_from_config(qapp):
+    """F2：QApplication 版本号读 config.app_version（0.2.0），不再写死旧版本号。"""
+    from src.ui.main_window import create_application
+
+    app = create_application([])
+    assert app.applicationVersion() == load_config().app_version
+    assert app.applicationVersion() == "0.2.0"
+
+
+def test_auto_start_real_mode_with_fake_scan(qapp, monkeypatch, tmp_path):
+    """F1：真实模式 auto_start（fake detect + fake 扫描/查询）启动即出结果，且可重新检测。"""
+    from types import SimpleNamespace
+
+    from src.app import mock_data
+    from src.app.service import BattleStatsResult
+    from src.ui.main_window import MainWindow
+
+    service = make_real_service(tmp_path / "auto-start.db")
+    fake_module = SimpleNamespace(
+        detect_environment=lambda **kwargs: SimpleNamespace(
+            game_dir="X:/FakeGame",
+            replay_dir="X:/FakeGame/replays",
+            account_id=7048141181,
+            account_name="kingbob_",
+            game_dir_source="registry",
+            account_source="replay_meta",
+        ),
+        apply_to_config=lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(service, "_load_detect_module", lambda: fake_module)
+    monkeypatch.setattr(service, "replay_dir_available", lambda: True)
+    monkeypatch.setattr(service, "list_replays", lambda *a, **k: mock_data.build_replays())
+    monkeypatch.setattr(service, "query_replay", lambda path: service._mock_query(str(path)))
+    monkeypatch.setattr(
+        service, "get_battle_stats",
+        lambda detail: BattleStatsResult(available=False, message="测试：跳过战绩请求"),
+    )
+    window = MainWindow(service)
+    window.show()
+    qapp.processEvents()
+    window.auto_start()
+    # 正确等待方式：processEvents + sleep（不能用 QTest.qWait 高频轮询）
+    assert wait_until(qapp, lambda: window.model.rowCount() > 0, timeout_s=15), "auto_start 未出结果"
+    assert "FakeGame" in window.env_game_label.text()
+    assert "kingbob_" in window.env_account_label.text()
+    rows_first = window.model.rowCount()
+    # 重新检测后再次扫描仍正常
+    window._on_redetect_environment_clicked()
+    assert wait_until(qapp, lambda: window.model.rowCount() > 0, timeout_s=15)
+    assert window.model.rowCount() == rows_first
+    window.close()
+    service.dispose()
+
+
 def test_main_window_update_failure_is_chinese(qapp):
     """更新失败提示为中文且不阻塞界面（直接调用失败回调）。"""
     from src.ui.main_window import MainWindow

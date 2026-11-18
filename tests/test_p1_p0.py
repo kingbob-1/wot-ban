@@ -32,6 +32,8 @@ KNOWN_FILES = [
 def _require_replays():
     if not WGID_JSON.is_file():
         pytest.skip("缺少 wgid 存档，跳过 P0 复验")
+    if not CFG.replay_dir:
+        pytest.skip("未检测到录像目录（v0.2 动态探测），跳过 P0 复验")
     paths = [Path(CFG.replay_dir) / name for name in KNOWN_FILES]
     missing = [str(path) for path in paths if not path.is_file()]
     if missing:

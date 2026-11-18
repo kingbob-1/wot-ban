@@ -4,10 +4,13 @@
 约定
 ----
 - 本模块是唯一的配置入口；其它模块不得硬编码路径 / URL / 阈值 / UA。
-- 默认值面向本机开发（Win10 + 工作区共享 runtime）；公开版首次运行可用
-  ``save_config`` 把用户选择的录像目录等写入 ``config.local.json`` 记忆。
-- 路径字段支持相对路径，统一相对 ``project_root`` 解析。
-- 读取顺序：内置默认值 -> ``config.json`` -> ``config.local.json``（后者优先）。
+- **不写死任何机器路径**（v0.2）：``archive_dir`` 默认相对 ``<项目>/data/archive``，
+  ``replay_dir`` / ``game_dir`` 默认 ``None``，由 ``load_config`` 启动时调用
+  ``src/detect.py`` 动态探测（注册表安装项 + 最新录像 meta + 常见目录扫描）后填充。
+- 路径字段支持相对路径，统一相对 ``project_root`` 解析；``None`` 表示未设置。
+- 读取顺序：内置默认值 -> ``config.json`` -> ``config.local.json``（后者优先）；
+  ``config.local.json`` 记录本机路径，已被 .gitignore 排除、不入库。
+- 探测结果可用 ``Config.auto_detect=False``（配置文件项 ``auto_detect``）关闭。
 """
 from __future__ import annotations
 
@@ -19,7 +22,10 @@ from typing import Any, Optional, Union
 
 CONFIG_FILE_NAME = "config.json"
 CONFIG_LOCAL_FILE_NAME = "config.local.json"
-PATH_FIELD_NAMES = ("project_root", "data_dir", "log_dir", "db_path", "archive_dir", "replay_dir")
+PATH_FIELD_NAMES = ("project_root", "data_dir", "log_dir", "db_path", "archive_dir",
+                    "game_dir", "replay_dir")
+# 允许为 None 的路径字段（未探测/未设置）
+OPTIONAL_PATH_FIELD_NAMES = ("game_dir", "replay_dir")
 
 
 def _default_project_root() -> Path:
@@ -32,12 +38,17 @@ class Config:
     """运行配置（唯一的可变配置容器）。字段只增不改名，供各模块按属性读取。"""
 
     # ------------------------------------------------------------ 路径
+    # 不写死任何机器路径：archive_dir 默认落项目内 data/archive，
+    # replay_dir/game_dir 默认 None，由 load_config 启动时动态探测填充（auto_detect）。
     project_root: Path = field(default_factory=_default_project_root)
     data_dir: Path = Path("data")
     log_dir: Path = Path("log")
     db_path: Path = Path("data") / "wotban.db"
-    archive_dir: Path = Path(r"<工作区>\research\wot-ban\archive")
-    replay_dir: Path = Path(r"X:\World_of_Tanks_CN\replays")
+    archive_dir: Path = Path("data") / "archive"
+    game_dir: Optional[Path] = None
+    replay_dir: Optional[Path] = None
+    # 启动时自动探测本机游戏目录 / 录像目录 / 我的账号（公开版首启也靠它）
+    auto_detect: bool = True
 
     # ---------------------------------------------- 官方名单接口（只读 GET）
     official_index_url: str = "https://profile.wg.360.cn/wstop/index"
@@ -83,18 +94,21 @@ class Config:
 
     # ------------------------------------------------------------ 界面
     app_name: str = "坦克世界封号案底查询工具"
-    app_version: str = "0.1.0"
+    app_version: str = "0.2.0"
     window_width: int = 1600
     window_height: int = 900
 
     def __post_init__(self) -> None:
-        """把路径字段统一解析为绝对路径（相对路径基于 project_root）。"""
+        """把路径字段统一解析为绝对路径（相对路径基于 project_root）；None 保持 None。"""
         self.project_root = Path(self.project_root).expanduser().resolve()
         for name in PATH_FIELD_NAMES:
-            value = Path(getattr(self, name)).expanduser()
-            if not value.is_absolute():
-                value = self.project_root / value
-            setattr(self, name, value)
+            value = getattr(self, name)
+            if value is None:
+                continue
+            path = Path(value).expanduser()
+            if not path.is_absolute():
+                path = self.project_root / path
+            setattr(self, name, path)
 
     def ensure_dirs(self) -> list:
         """创建数据 / 日志目录（运行产物目录，不入库），返回本次新建的目录。"""
@@ -167,23 +181,103 @@ def _validate_keys(overrides: dict) -> None:
         warnings.warn("忽略未知配置项: %s" % ", ".join(unknown), stacklevel=3)
 
 
-def load_config(config_path: Optional[Union[str, Path]] = None) -> Config:
-    """加载配置对象。
+def load_config(config_path: Optional[Union[str, Path]] = None,
+                auto_detect: Optional[bool] = None,
+                verbose: bool = True) -> Config:
+    """加载配置对象（v0.2：启动时自动探测本机环境，不写死任何机器路径）。
 
-    config_path 为空时：读取项目根 ``config.json``，再用 ``config.local.json`` 覆盖。
-    显式传入 config_path 时：只读取该文件（叠加内置默认值）。
+    参数
+    ----
+    config_path: 为空时读项目根 ``config.json`` 再用 ``config.local.json`` 覆盖；
+        显式传入时只读该文件（叠加内置默认值）。
+    auto_detect: 覆盖 ``Config.auto_detect``（测试可显式关掉探测）。
+    verbose: 探测到结果时打印中文提示（默认 True）。
+
+    流程：内置默认 -> config.json -> config.local.json -> 若 auto_detect 且
+    replay_dir/game_dir 缺失或不存在 -> ``src.detect.detect_environment()`` 探测并写回。
     """
     overrides: dict = {}
     for path in _config_file_paths(config_path):
         overrides.update(_read_config_file(path))
-    if not overrides:
-        return Config()
-    _validate_keys(overrides)
-    for name in PATH_FIELD_NAMES:
-        if overrides.get(name) is not None:
-            overrides[name] = Path(str(overrides[name]))
-    overrides.setdefault("project_root", _default_project_root())
-    return Config(**overrides)
+    if overrides:
+        _validate_keys(overrides)
+        for name in PATH_FIELD_NAMES:
+            if overrides.get(name) is not None:
+                overrides[name] = Path(str(overrides[name]))
+        overrides.setdefault("project_root", _default_project_root())
+    cfg = Config(**overrides) if overrides else Config()
+    if auto_detect is not None:
+        cfg.auto_detect = bool(auto_detect)
+    if cfg.auto_detect and _needs_auto_detect(cfg):
+        fill_config_by_detection(cfg, verbose=verbose)
+    return cfg
+
+
+# ---------------------------------------------------------------- 自动探测
+_AUTO_DETECT_CACHE = {"environment": None}
+
+
+def _reset_auto_detect_cache() -> None:
+    """清空探测缓存（测试 / GUI「重新检测」用）。"""
+    _AUTO_DETECT_CACHE["environment"] = None
+
+
+def _needs_auto_detect(cfg: Config) -> bool:
+    """录像目录或游戏目录缺失/不存在时才需要探测。"""
+    replay_dir = getattr(cfg, "replay_dir", None)
+    game_dir = getattr(cfg, "game_dir", None)
+    replay_ok = bool(replay_dir) and Path(replay_dir).is_dir()
+    game_ok = bool(game_dir) and Path(game_dir).is_dir()
+    return not (replay_ok and game_ok)
+
+
+def _import_detect_module():
+    """导入 ``src/detect.py``（兼容包内 import 与直接以脚本运行两种方式）。"""
+    try:
+        from . import detect as detect_module
+    except ImportError:  # python src/config.py 直接运行
+        import sys as _sys
+
+        root = str(Path(__file__).resolve().parent.parent)
+        if root not in _sys.path:
+            _sys.path.insert(0, root)
+        from src import detect as detect_module
+    return detect_module
+
+
+def _cached_environment():
+    """进程内缓存一次探测结果（注册表 + 录像目录扫描只做一次，避免每次 load_config 重扫）。"""
+    if _AUTO_DETECT_CACHE["environment"] is None:
+        _AUTO_DETECT_CACHE["environment"] = _import_detect_module().detect_environment()
+    return _AUTO_DETECT_CACHE["environment"]
+
+
+def _print_detection(environment) -> None:
+    """打印中文探测提示（启动日志可见：游戏目录 / 录像目录 / 我的账号）。"""
+    detect_module = _import_detect_module()
+    if environment.game_dir:
+        print("[检测] 游戏目录：%s（来源：%s）"
+              % (environment.game_dir, environment.game_dir_source or "自动探测"))
+    if environment.replay_dir:
+        replay_count = detect_module.replay_stats(environment.replay_dir)[0]
+        print("[检测] 录像目录：%s（%d 个录像）" % (environment.replay_dir, replay_count))
+    if environment.account_id:
+        print("[检测] 我的账号：%s（ID %s，来源：%s）"
+              % (environment.account_name or "未知昵称", environment.account_id,
+                 environment.account_source or "最新录像 meta"))
+    if not environment.detected:
+        print("[检测] 未检测到游戏安装目录：可手动选择录像目录，"
+              "或在 config.local.json 指定 game_dir/replay_dir")
+
+
+def fill_config_by_detection(cfg: Config, environment=None, verbose: bool = True) -> Config:
+    """用动态探测结果填充配置（显式值优先，只补缺失/不存在项），返回同一个 cfg。"""
+    detect_module = _import_detect_module()
+    env = environment if environment is not None else _cached_environment()
+    detect_module.apply_to_config(cfg=cfg, env=env)
+    if verbose:
+        _print_detection(env)
+    return cfg
 
 
 def save_config(config: Config, config_path: Optional[Union[str, Path]] = None) -> Path:
@@ -199,7 +293,7 @@ def save_config(config: Config, config_path: Optional[Union[str, Path]] = None) 
 
 
 def main(argv: list) -> int:
-    """命令行自检：打印当前生效配置（独立运行入口）。"""
+    """命令行自检：打印当前生效配置（含自动探测结果；独立运行入口）。"""
     import time
 
     start = time.time()
@@ -210,7 +304,11 @@ def main(argv: list) -> int:
     print("log_dir      : %s" % cfg.log_dir)
     print("db_path      : %s" % cfg.db_path)
     print("archive_dir  : %s (exists=%s)" % (cfg.archive_dir, cfg.archive_dir.exists()))
-    print("replay_dir   : %s (exists=%s)" % (cfg.replay_dir, cfg.replay_dir.exists()))
+    print("game_dir     : %s (exists=%s)"
+          % (cfg.game_dir or "未检测到", bool(cfg.game_dir) and Path(cfg.game_dir).exists()))
+    print("replay_dir   : %s (exists=%s)"
+          % (cfg.replay_dir or "未检测到", bool(cfg.replay_dir) and Path(cfg.replay_dir).exists()))
+    print("auto_detect  : %s" % cfg.auto_detect)
     print("app          : %s v%s" % (cfg.app_name, cfg.app_version))
     print("[done] base_path=%r 耗时 %.2f 秒" % (base_path, time.time() - start))
     return 0
@@ -222,4 +320,6 @@ if __name__ == "__main__":
     # 直接以脚本方式运行（python src/config.py）时，把项目根加入 sys.path 以便导入自身包。
     if __package__ in (None, ""):
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.exit(main(sys.argv[1:]))

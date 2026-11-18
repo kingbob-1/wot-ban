@@ -615,6 +615,38 @@ class DataStatusDialog(QDialog):
         self.db_label.setWordWrap(True)
         layout.addWidget(self.db_label)
 
+        # v0.2：本机环境（游戏目录 / 录像目录 / 我的账号 / 最近对局）
+        env_title = QLabel("本机环境")
+        env_title.setObjectName("SectionTitle")
+        layout.addWidget(env_title)
+        env_grid = QGridLayout()
+        env_grid.setHorizontalSpacing(24)
+        env_grid.setVerticalSpacing(6)
+        self.env_values = {}
+        env_fields = [
+            ("game", "游戏目录"),
+            ("game_source", "游戏目录来源"),
+            ("replay", "录像目录"),
+            ("account", "我的账号"),
+            ("last_battle", "最近对局"),
+        ]
+        for index, (key, label) in enumerate(env_fields):
+            name_label = QLabel(label)
+            name_label.setObjectName("FieldName")
+            value_label = QLabel("—")
+            value_label.setObjectName("MetaValue")
+            value_label.setWordWrap(True)
+            self.env_values[key] = value_label
+            row = index // 3
+            column = (index % 3) * 2
+            env_grid.addWidget(name_label, row, column)
+            env_grid.addWidget(value_label, row, column + 1)
+        layout.addLayout(env_grid)
+        self.env_hint = QLabel("")
+        self.env_hint.setObjectName("StatsHint")
+        self.env_hint.setWordWrap(True)
+        layout.addWidget(self.env_hint)
+
         self.batch_table = _plain_table(["批次日", "来源", "记录数", "带 wgid 记录"])
         self.batch_table.horizontalHeader().setStretchLastSection(False)
         for index in range(4):
@@ -708,6 +740,20 @@ class DataStatusDialog(QDialog):
     def set_action_message(self, text: str) -> None:
         """显示数据管理操作进度 / 结果。"""
         self.action_label.setText(text)
+
+    def set_environment(self, env: Any) -> None:
+        """填充「本机环境」区（v0.2 自动探测结果）。"""
+        if env is None:
+            for label in self.env_values.values():
+                label.setText("—")
+            self.env_hint.setText("")
+            return
+        self.env_values["game"].setText(getattr(env, "game_dir_text", "—"))
+        self.env_values["game_source"].setText(getattr(env, "game_dir_source", "") or "—")
+        self.env_values["replay"].setText(str(getattr(env, "replay_dir", "") or "—"))
+        self.env_values["account"].setText(getattr(env, "account_text", "—"))
+        self.env_values["last_battle"].setText(format_iso_text(getattr(env, "last_battle_time", "")))
+        self.env_hint.setText(getattr(env, "message", "") or "")
 
     def set_actions_enabled(self, enabled: bool) -> None:
         """数据管理操作执行期间禁用按钮。"""

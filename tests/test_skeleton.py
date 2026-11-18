@@ -30,12 +30,13 @@ def test_contract_modules_import():
 
 
 def test_config_defaults():
-    """默认路径落在预期位置（archive / replay / db）。"""
-    cfg = load_config(Path(PROJECT_ROOT) / "nonexistent.json")
+    """默认路径不写死机器路径：archive 相对项目、replay/game 为 None（v0.2 动态探测）。"""
+    cfg = load_config(Path(PROJECT_ROOT) / "nonexistent.json", auto_detect=False)
     assert isinstance(cfg, Config)
     assert cfg.db_path == cfg.project_root / "data" / "wotban.db"
-    assert str(cfg.archive_dir).lower().endswith("research\\wot-ban\\archive")
-    assert str(cfg.replay_dir).lower().endswith("world_of_tanks_cn\\replays")
+    assert cfg.archive_dir == cfg.project_root / "data" / "archive"
+    assert cfg.replay_dir is None
+    assert cfg.game_dir is None
     assert "common_logger" not in str(cfg.db_path)
 
 

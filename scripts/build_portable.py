@@ -8,13 +8,13 @@
 3. 下载并校验 CPython 便携包（tar.gz）；
 4. 解压到构建目录；
 5. 向便携解释器安装 PySide6（默认清华镜像，可配代理）；
-6. 组装便携包目录：复制源码 + 生成便携版 run.bat + 许可证/说明；
+6. 组装便携包目录：复制源码 + 薄启动器 exe/图标/启动器文档 + 生成便携版 run.bat + 许可证/说明；
 7. 自检：便携解释器 import PySide6、跑 main.py --version；
 8. 打包 zip 并输出大小与 sha256。
 
 说明
 ----
-- 不打包 exe（计划 U5/Q2）：便携包 = 未修改的 CPython 解释器 + PySide6 动态库 + 源码；
+- 便携包 = 薄启动器 exe（不含 Python）+ 内嵌 CPython 3.12（包内 ``runtime\\`` 目录）+ PySide6 动态库 + 源码；
 - ``--dry-run`` 只做参数解析、源码检查与步骤预览，不下载、不安装、不写盘；
 - 默认不执行任何网络请求；只有实际构建（非 dry-run）或显式 ``--check-url`` 时才联网。
 
@@ -180,7 +180,8 @@ def print_plan(cfg: BuildConfig, state: BuildState, problems: list) -> None:
         print("预计下载体积 : 约 %s（CPython 便携包）" % format_size(44900000))
     print("预计成品体积 : 约 250 MB（CPython + PySide6 + 源码，zip 后体积会小一些）")
     print("成品 zip     : %s" % (cfg.output_dir / build_zip_name(cfg)))
-    print("便携版入口   : 包内 run.bat（使用包内 python\\pythonw.exe 启动）")
+    print("便携版入口   : 包内 坦克世界封号查询.exe（双击启动；内嵌运行时位于包内 runtime\\ 目录）")
+    print("备用入口     : 包内 run.bat（全 ASCII，直接调用包内 runtime\\pythonw.exe）")
     print("")
     if problems:
         print("源码/环境检查：发现 %d 个问题" % len(problems))
@@ -203,6 +204,9 @@ def collect_source_files(cfg: BuildConfig) -> dict:
         "README.md": root / "README.md",
         "docs/使用说明.md": root / "docs" / "使用说明.md",
         "docs/第三方组件许可.md": root / "docs" / "第三方组件许可.md",
+        "docs/P4-启动器.md": root / "docs" / "P4-启动器.md",
+        "坦克世界封号查询.exe": root / "坦克世界封号查询.exe",
+        "assets/app.ico": root / "assets" / "app.ico",
         "docs/shots 目录": root / "docs" / "shots",
     }
 
@@ -473,11 +477,13 @@ def portable_run_bat_lines() -> list:
     """返回便携版 run.bat 的逐行内容（全 ASCII）。"""
     return [
         "@echo off",
-        "rem wot-ban portable launcher: use the bundled CPython runtime.",
+        "rem wot-ban portable ASCII fallback launcher.",
+        "rem Normal use: double-click the launcher exe in this folder.",
+        "rem This bat is an ASCII-only fallback that runs main.py with the bundled runtime.",
         "setlocal",
         'set "PROJECT_DIR=%~dp0"',
-        'set "PY=%PROJECT_DIR%python\\python.exe"',
-        'set "PYW=%PROJECT_DIR%python\\pythonw.exe"',
+        'set "PY=%PROJECT_DIR%runtime\\python.exe"',
+        'set "PYW=%PROJECT_DIR%runtime\\pythonw.exe"',
         "",
         'if not exist "%PY%" (',
         "    echo [ERROR] Bundled Python runtime not found:",
@@ -561,6 +567,21 @@ def copy_source_tree(cfg: BuildConfig, stage_dir: Path) -> None:
         shots_target.mkdir(parents=True, exist_ok=True)
         for image in sorted(shots_source.glob("*.png")):
             shutil.copy2(image, shots_target / image.name)
+    launcher_exe = root / "坦克世界封号查询.exe"
+    if not launcher_exe.is_file():
+        raise BuildError(
+            "缺少薄启动器 exe：%s" % launcher_exe,
+            "先运行项目根的 build_launcher.bat 生成启动器（便携包 = 启动器 + 内嵌运行时 + 源码）",
+        )
+    shutil.copy2(launcher_exe, stage_dir / launcher_exe.name)
+    icon_source = root / "assets" / "app.ico"
+    if icon_source.is_file():
+        icon_target = stage_dir / "assets"
+        icon_target.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(icon_source, icon_target / icon_source.name)
+    p4_doc = root / "docs" / "P4-启动器.md"
+    if p4_doc.is_file():
+        shutil.copy2(p4_doc, docs_target / p4_doc.name)
     write_portable_run_bat(stage_dir / "run.bat")
 
 
@@ -602,10 +623,31 @@ def verify_stage(cfg: BuildConfig, stage_dir: Path, python_dir: Path) -> dict:
             "便携环境自检失败：main.py --version 退出码 %d" % version_result.returncode,
             "检查源码是否完整",
         )
-    return {
+    report = {
         "python_info": (result.stdout or "").strip().splitlines(),
         "app_version_output": (version_result.stdout or "").strip(),
+        "launcher_output": "",
     }
+    launcher_exe = stage_dir / "坦克世界封号查询.exe"
+    if launcher_exe.is_file():
+        launcher_result = subprocess.run(
+            [str(launcher_exe), "--version"],
+            cwd=str(stage_dir),
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if launcher_result.returncode != 0:
+            raise BuildError(
+                "便携包自检失败：启动器 exe --version 退出码 %d" % launcher_result.returncode,
+                "确认包内 runtime\\python.exe、main.py 与启动器布局正确；详细输出：%s"
+                % ((launcher_result.stderr or "")[-600:]),
+            )
+        launcher_stdout = (launcher_result.stdout or "").strip()
+        report["launcher_output"] = launcher_stdout.splitlines()[-1] if launcher_stdout else ""
+    return report
 
 
 def create_zip(stage_dir: Path, zip_path: Path) -> Path:
@@ -710,7 +752,7 @@ def execute_build(cfg: BuildConfig, state: BuildState) -> int:
     stage_dir.mkdir(parents=True, exist_ok=True)
     shutil.copytree(
         state.python_dir,
-        stage_dir / "python",
+        stage_dir / "runtime",
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
     copy_source_tree(cfg, stage_dir)
@@ -720,9 +762,11 @@ def execute_build(cfg: BuildConfig, state: BuildState) -> int:
     if cfg.skip_verify:
         print("[跳过] 便携环境自检（--skip-verify）")
     else:
-        state.report = verify_stage(cfg, stage_dir, stage_dir / "python")
+        state.report = verify_stage(cfg, stage_dir, stage_dir / "runtime")
         print("[自检] %s" % "；".join(state.report.get("python_info", [])))
         print("[自检] %s" % state.report.get("app_version_output", ""))
+        if state.report.get("launcher_output"):
+            print("[自检] 启动器 exe：%s" % state.report["launcher_output"])
     print_step(7, total, PLAN_TITLES[6], time.perf_counter() - step_start, "完成")
 
     step_start = time.perf_counter()
@@ -751,7 +795,7 @@ def parse_args(argv: list) -> argparse.Namespace:
     """解析命令行参数。"""
     parser = argparse.ArgumentParser(
         prog="build_portable.py",
-        description="构建 wot-ban Windows 便携包（CPython + PySide6 + 源码，不打包 exe）",
+        description="构建 wot-ban Windows 便携包（薄启动器 + 内嵌 CPython + PySide6 + 源码）",
     )
     parser.add_argument("--dry-run", action="store_true", help="只做参数解析、源码检查与步骤预览，不下载不打包")
     parser.add_argument("--check-url", action="store_true", help="HEAD 探测 CPython 下载地址是否可用（需联网）")

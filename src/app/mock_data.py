@@ -12,6 +12,7 @@ mock 模式，用本模块数据跑通「选择录像 -> 查询 -> 表格 / 明�
 from __future__ import annotations
 
 import sys
+import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -26,8 +27,9 @@ except ImportError:  # 直接以脚本方式运行时的兜底
 MOCK_NOW = datetime(2026, 11, 18, 15, 30, 0)
 MOCK_NOW_ISO = "2026-11-18T15:30:00+08:00"
 
-# 录像目录 / 文件名只用于展示，不要求真实存在。
-MOCK_REPLAY_DIR = r"X:\World_of_Tanks_CN\replays"
+# 演示用路径全部合成（不写死任何本机路径）：临时目录下的 wot-ban-demo。
+MOCK_BASE_DIR = Path(tempfile.gettempdir()) / "wot-ban-demo"
+MOCK_REPLAY_DIR = str(MOCK_BASE_DIR / "replays")
 
 _PLAYER_NAMES = [
     "铁血战狼2020", "GhostShell", "炮火连天", "Panzerfaust", "北境守望者",
@@ -373,7 +375,7 @@ def build_data_status() -> dict:
     ]
     return {
         "available": True,
-        "db_path": r"<项目目录>\data\wotban.db",
+        "db_path": str(MOCK_BASE_DIR / "wotban.db"),
         "batch_count": 114,
         "record_count": 322806,
         "official_record_count": 322941,
@@ -389,6 +391,21 @@ def build_data_status() -> dict:
         "batches": batches,
         "message": "演示数据：114 批 / 去重入库 322,806 条（官方源 322,941 物理行）；wgid 覆盖 1 期（100/129 条）；无缺失批次",
         "mock": True,
+    }
+
+
+def build_mock_environment() -> dict:
+    """构造演示环境（合成路径，不写死本机路径；供 v0.2 环境探测降级/mock 使用）。"""
+    return {
+        "game_dir": str(MOCK_BASE_DIR / "game"),
+        "replay_dir": MOCK_REPLAY_DIR,
+        "account_id": 7000000001,
+        "account_name": "演示玩家",
+        "game_dir_source": "mock（演示数据）",
+        "account_source": "mock（演示数据）",
+        "last_battle_time": "2026-11-17T20:14:00+08:00",
+        "detected": True,
+        "message": "演示环境（mock）：未读取本机注册表与真实录像",
     }
 
 

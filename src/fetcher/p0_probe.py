@@ -11,11 +11,13 @@
 用法
 ----
     ..\\runtime\\python.exe src\\fetcher\\p0_probe.py
-    ... --replay-dir "X:\\World_of_Tanks_CN\\replays" --wgid-json <path> --out data\\p0_evidence.json
+    ... --replay-dir "<录像目录>" --wgid-json <path> --out data\\p0_evidence.json
     ... --files <a.wotreplay> <b.wotreplay>        # 只解析指定文件（快速复验）
     ... --recursive                                # 递归子目录（归档目录一起扫）
 
-只读：仅读取录像文件与 wgid 存档，不写数据库、不改任何数据；证据 JSON 由 ``--out`` 指定。
+默认录像目录取 ``Config.replay_dir``（启动时由 ``src/detect.py`` 动态探测，v0.2 起不写死）；
+未探测到则给出中文提示。只读：仅读取录像文件与 wgid 存档，不写数据库、不改任何数据；
+证据 JSON 由 ``--out`` 指定。
 """
 from __future__ import annotations
 
@@ -178,7 +180,11 @@ def main(argv: list) -> int:
     out_path = Path(options["out"]) if options["out"] else None
     files = options["files"] or None
     print("[1/2] 复验目标：replay_dir=%s wgid=%s files=%s" %
-          (replay_dir, wgid_json, len(files) if files else "全部"))
+          (replay_dir or "未检测到", wgid_json, len(files) if files else "全部"))
+    if replay_dir is None or not Path(replay_dir).is_dir():
+        print("[error] 未检测到录像目录：请在 config.local.json 指定 replay_dir，"
+              "或用 --replay-dir 显式传入录像目录")
+        return 2
     if not Path(wgid_json).is_file():
         print("[error] 缺少 wgid 存档：%s" % wgid_json)
         return 2

@@ -97,6 +97,7 @@ WORKER_ATTR_NAMES = (
     "_battle_worker",
     "_player_stats_worker",
     "_library_worker",
+    "_env_worker",
 )
 
 
@@ -110,8 +111,16 @@ def create_application(argv: Optional[list] = None) -> Any:
         except Exception:  # noqa: BLE001 - 高 DPI 策略设置失败不影响启动
             pass
     app = QApplication.instance() or QApplication(argv if argv is not None else sys.argv)
-    app.setApplicationName("坦克世界封号案底查询工具")
-    app.setApplicationVersion("0.1.0")
+    try:
+        from ..config import load_config
+    except ImportError:  # 直接以脚本方式运行时的兜底
+        from src.config import load_config
+    try:
+        cfg = load_config()
+        app.setApplicationName(cfg.app_name)
+        app.setApplicationVersion(cfg.app_version)
+    except Exception:  # noqa: BLE001 - 配置不可用时退回默认名称，不阻断启动
+        app.setApplicationName("坦克世界封号案底查询工具")
     theme.configure_application(app)
     return app
 
@@ -154,6 +163,9 @@ class MainWindow(QMainWindow):
         self._data_status: Any = None
         self._status_dialog: Any = None
         self._library_worker: Optional[ServiceWorker] = None
+        self._env_worker: Optional[ServiceWorker] = None
+        self._environment: Any = None
+        self._env_seq = 0
         self._update_timer: Any = None
         self._query_seq = 0
         self._scan_mode = "latest"
@@ -233,6 +245,30 @@ class MainWindow(QMainWindow):
         self.mode_hint.setWordWrap(True)
         meta_row.addWidget(self.mode_hint, 1)
         layout.addLayout(meta_row)
+
+        # v0.2：本机环境（启动即探测显示，无需点击）
+        env_row = QHBoxLayout()
+        env_row.setSpacing(10)
+        env_title = QLabel("本机环境")
+        env_title.setObjectName("FieldName")
+        env_row.addWidget(env_title)
+        self.env_game_label = QLabel("游戏目录：检测中…")
+        self.env_game_label.setObjectName("MetaValue")
+        self.env_account_label = QLabel("我的账号：检测中…")
+        self.env_account_label.setObjectName("MetaValue")
+        self.env_source_label = QLabel("")
+        self.env_source_label.setObjectName("MetaHint")
+        self.redetect_button = QPushButton("重新检测")
+        self.redetect_button.setObjectName("Ghost")
+        self.redetect_button.setToolTip("重新探测游戏安装目录与我的账号（注册表卸载项 + 最新录像 meta）")
+        self.manual_game_button = QPushButton("手动选择游戏目录")
+        self.manual_game_button.setToolTip("手动指定《坦克世界》安装目录，选择后保存到 config.local.json")
+        env_row.addWidget(self.env_game_label)
+        env_row.addWidget(self.env_account_label)
+        env_row.addWidget(self.env_source_label, 1)
+        env_row.addWidget(self.redetect_button)
+        env_row.addWidget(self.manual_game_button)
+        layout.addLayout(env_row)
         return header
 
     def _build_replay_bar(self) -> Any:
@@ -427,6 +463,8 @@ class MainWindow(QMainWindow):
         self.scan_recent_button.clicked.connect(partial(self.start_scan, "recent"))
         self.scan_all_button.clicked.connect(partial(self.start_scan, "all"))
         self.manual_button.clicked.connect(self._on_manual_clicked)
+        self.redetect_button.clicked.connect(self._on_redetect_environment_clicked)
+        self.manual_game_button.clicked.connect(self._on_manual_game_dir_clicked)
         self.cancel_button.clicked.connect(self._on_cancel_clicked)
         self.replay_combo.currentIndexChanged.connect(self._on_replay_index_changed)
         self.id_only_check.stateChanged.connect(self._on_filter_changed)
@@ -545,6 +583,7 @@ class MainWindow(QMainWindow):
             return None
         dialog = DataStatusDialog(self)
         dialog.set_status(status)
+        dialog.set_environment(self._environment or self.service.current_environment())
         if dialog.clear_requested is not None:
             dialog.clear_requested.connect(partial(self._on_clear_library_requested, dialog))
             dialog.rebuild_requested.connect(partial(self._on_rebuild_library_requested, dialog))
@@ -564,6 +603,7 @@ class MainWindow(QMainWindow):
             return
         try:
             dialog.set_status(self.service.get_data_status())
+            dialog.set_environment(self._environment or self.service.current_environment())
         except ServiceError as exc:
             dialog.set_action_message("刷新数据状态失败：%s" % exc)
 
@@ -771,6 +811,9 @@ class MainWindow(QMainWindow):
         """扫描录像（mode: latest / recent / all）。"""
         if self._worker_running(self._scan_worker):
             return
+        if not self.service.is_mock and not self.service.replay_dir_available():
+            self._apply_replay_dir_state()
+            return
         self._scan_mode = mode
         self._set_scan_busy(True)
         days = int(self.service.cfg.default_scan_days)
@@ -855,8 +898,10 @@ class MainWindow(QMainWindow):
             self.progress_label.setText("正在取消更新…")
 
     def _on_manual_clicked(self) -> None:
+        replay_dir = self.service._replay_dir_path()
+        initial = str(replay_dir) if replay_dir is not None else str(Path.home())
         path, _selected = QFileDialog.getOpenFileName(
-            self, "选择坦克世界录像文件", str(self.service.cfg.replay_dir),
+            self, "选择坦克世界录像文件", initial,
             "坦克世界录像 (*.wotreplay);;所有文件 (*)",
         )
         if not path:
@@ -1085,12 +1130,99 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, title, message)
 
     def auto_start(self) -> None:
-        """窗口显示后的自动动作：刷新数据状态 + 扫描最新完整录像 + 启动检查一次（A1）。"""
+        """窗口显示后的自动动作：刷新数据状态 + 探测本机环境（无需点击）+ 扫描 + A1 检查。"""
         self._refresh_data_status()
-        self.start_scan("latest")
+        self.env_game_label.setText("游戏目录：检测中…")
+        self.env_account_label.setText("我的账号：检测中…")
+        self._env_seq += 1
+        env = self.service.detect_environment(apply=True)
+        self._apply_environment(env)
+        if self.service.replay_dir_available():
+            self.start_scan("latest")
         if QTimer is not None:
             # 启动检查延后 3 秒，让首次录像扫描先完成，避免两个 worker 同时打开 SQLite。
             QTimer.singleShot(3000, partial(self._start_update_check, True, False))
+
+    def start_environment_detect(self, then_scan: bool = True) -> None:
+        """后台探测本机环境（游戏目录 / 我的账号），完成后刷新顶栏与录像区。"""
+        self._env_seq += 1
+        seq = self._env_seq
+        fn = lambda progress, should_cancel: self.service.detect_environment(apply=True)  # noqa: E731
+        self._env_worker = self._start_worker(
+            "环境检测", fn,
+            on_success=partial(self._on_environment_detected, seq, then_scan),
+            on_error=partial(self._on_environment_failed, seq),
+        )
+
+    def _apply_environment(self, env: Any) -> None:
+        """刷新顶栏环境标签 / 状态页环境区 / 录像区可用状态。"""
+        self._environment = env
+        game_text = getattr(env, "game_dir_text", "未检测到游戏目录")
+        account_text = getattr(env, "account_text", "未检测到账号")
+        self.env_game_label.setText("游戏目录：%s" % game_text)
+        self.env_account_label.setText("我的账号：%s" % account_text)
+        self.env_source_label.setText(getattr(env, "source_text", ""))
+        self.env_source_label.setToolTip(getattr(env, "message", "") or "")
+        self.env_game_label.setToolTip(getattr(env, "message", "") or game_text)
+        self._apply_replay_dir_state()
+        self._refresh_status_dialog()
+
+    def _apply_replay_dir_state(self) -> None:
+        """录像区按 cfg.replay_dir 状态启用/禁用扫描，并给中文提示。"""
+        available = self.service.replay_dir_available()
+        for button in (self.scan_latest_button, self.scan_recent_button, self.scan_all_button):
+            button.setEnabled(available)
+        replay_dir = getattr(self.service.cfg, "replay_dir", None)
+        if not available:
+            self.progress_label.setText(
+                "未找到录像目录：请点击「重新检测」或「手动选择游戏目录」（当前：%s）"
+                % (replay_dir or "未设置")
+            )
+        elif not self._worker_running(self._scan_worker):
+            self.progress_label.setText("录像目录：%s" % replay_dir)
+
+    def _on_environment_detected(self, seq: int, then_scan: bool, env: Any) -> None:
+        if seq != self._env_seq:
+            return
+        self._apply_environment(env)
+        message = getattr(env, "message", "") or "环境检测完成"
+        self.statusBar().showMessage(message, 10000)
+        if then_scan and self.service.replay_dir_available():
+            self.start_scan("latest")
+
+    def _on_environment_failed(self, seq: int, message: str) -> None:
+        if seq != self._env_seq:
+            return
+        self.env_game_label.setText("游戏目录：检测失败")
+        self.env_account_label.setText("我的账号：检测失败")
+        self.env_source_label.setText(message)
+        self.statusBar().showMessage(message, 10000)
+        self._apply_replay_dir_state()
+
+    def _on_redetect_environment_clicked(self) -> None:
+        """「重新检测」：重新探测并刷新录像区（探测成功则自动扫描）。"""
+        self.statusBar().showMessage("正在重新检测本机环境…", 5000)
+        self.env_game_label.setText("游戏目录：检测中…")
+        self.env_account_label.setText("我的账号：检测中…")
+        self._env_seq += 1
+        env = self.service.detect_environment(apply=True)
+        self._apply_environment(env)
+        self.statusBar().showMessage(getattr(env, "message", "") or "环境检测完成", 10000)
+        if self.service.replay_dir_available():
+            self.start_scan("latest")
+
+    def _on_manual_game_dir_clicked(self) -> None:
+        """「手动选择游戏目录」：选择后 save_config 记忆并刷新。"""
+        replay_dir = self.service._replay_dir_path()
+        initial = str(replay_dir) if replay_dir is not None else str(Path.home())
+        selected = QFileDialog.getExistingDirectory(self, "选择《坦克世界》安装目录", initial)
+        if not selected:
+            return
+        env = self.service.select_game_dir(selected)
+        self._apply_environment(env)
+        self.statusBar().showMessage(getattr(env, "message", "已选择游戏目录"), 12000)
+        if self.service.replay_dir_available():
+            self.start_scan("latest")
 
     # ------------------------------------------------------------ 截图辅助（脚本用）
     def select_replay_by_path(self, path: str) -> bool:
