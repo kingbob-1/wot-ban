@@ -1,0 +1,31 @@
+# 运行产物与本地数据（公开仓库不含名单数据 / 数据库 / 日志）
+data/
+log/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# 本地配置（含本机路径 / 录像目录）
+config.local.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# 构建产物
+build/
+dist/
+*.zip
+
+# IDE / OS
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
