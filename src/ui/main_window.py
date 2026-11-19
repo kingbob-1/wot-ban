@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
-"""主窗口：P3 MVP 界面骨架（顶栏 / 录像区 / 结果表 / 明细 / 汇总 / 免责声明）。
+"""主窗口：1.0 定稿界面骨架（顶栏 / 录像区 / 结果表 / 明细 / 汇总 / 免责声明）。
 
 界面全部代码构建（无 .ui 文件）。窗口 16:9 可缩放，默认 1920×1080（屏幕可用区域
-不足时等比收缩）；字体微软雅黑、高 DPI 由 Qt 处理。顶栏只保留标题、版本与操作按钮，
-名单库版本信息与本机环境路径改在「数据状态」页查看。
+不足时等比收缩）；字体微软雅黑、高 DPI 由 Qt 处理。1.0 定稿顶栏只保留标题、版本与
+三个操作按钮（重新检测 / 手动选择游戏目录 / 更新名单），不再提供「数据状态」入口；
+录像区只保留「最新完整录像 / 全部录像 / 手动选择…」三个扫描入口。数据状态页仍保留
+``open_data_status()`` 供开发 / QA 脚本直接调用。
 
 线程模型
 --------
@@ -87,7 +89,9 @@ except ImportError:  # 直接以脚本方式运行时的兜底
     )
     from src.ui.widgets import DataStatusDialog, PlayerDetailPanel, ScrollableComboBox
 
-SCAN_MODE_LABELS = {"latest": "最新完整录像", "recent": "最近 7 天", "all": "全部录像", "file": "手动选择"}
+# 1.0 定稿：录像区只保留「最新完整录像 / 全部录像 / 手动选择…」三个入口；
+# service 层 recent 能力与 config.default_scan_days 不变（仅拆掉 UI 入口）。
+SCAN_MODE_LABELS = {"latest": "最新完整录像", "all": "全部录像", "file": "手动选择"}
 
 # 「查询结果」标题行：本局胜负平文案（胜绿 / 平橙 / 负红，见 theme.APP_QSS）。
 RESULT_TITLE_BASE = "查询结果"
@@ -277,11 +281,12 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("就绪：正在准备界面…")
 
     def _build_header(self) -> Any:
-        """顶栏（单行）：标题 + 版本 + 操作按钮。
+        """顶栏（单行）：标题 + 版本 + 三个操作按钮。
 
         v0.3 精简：原先的「数据更新 / 名单规模 / wgid 覆盖 / 缺失批次 / 上次检查」
-        元信息行、「本地真实数据」徽标与「本机环境」路径信息行全部移除；名单库版本
-        信息统一在「数据状态」页查看，本机环境路径只保留在按钮 tooltip 与状态页。
+        元信息行、「本地真实数据」徽标与「本机环境」路径信息行全部移除。
+        1.0 定稿：再移除「数据状态」按钮，顶栏只留「重新检测 / 手动选择游戏目录 /
+        更新名单」；数据状态页保留 ``open_data_status()`` 内部入口。
         """
         header = QFrame()
         header.setObjectName("Header")
@@ -301,13 +306,10 @@ class MainWindow(QMainWindow):
         self.redetect_button.setToolTip("重新探测游戏安装目录与我的账号（注册表卸载项 + 最新录像 meta）")
         self.manual_game_button = QPushButton("手动选择游戏目录")
         self.manual_game_button.setToolTip("手动指定《坦克世界》安装目录，选择后保存到 config.local.json")
-        self.data_status_button = QPushButton("数据状态")
-        self.data_status_button.setToolTip("查看名单库批次数 / 条数 / 更新时间 / wgid 覆盖 / 缺失批次")
         self.update_button = QPushButton("更新名单")
         self.update_button.setObjectName("Primary")
         self.update_button.setToolTip("检查官方名单接口并增量更新（启动时自动检查一次，运行期每 6 小时）")
-        for button in (self.redetect_button, self.manual_game_button,
-                       self.data_status_button, self.update_button):
+        for button in (self.redetect_button, self.manual_game_button, self.update_button):
             layout.addWidget(button)
         return header
 
@@ -325,11 +327,9 @@ class MainWindow(QMainWindow):
         row.addWidget(title)
         self.scan_latest_button = QPushButton("最新完整录像")
         self.scan_latest_button.setObjectName("Primary")
-        self.scan_recent_button = QPushButton("最近 7 天")
         self.scan_all_button = QPushButton("全部录像")
         self.manual_button = QPushButton("手动选择…")
-        for button in (self.scan_latest_button, self.scan_recent_button, self.scan_all_button,
-                       self.manual_button):
+        for button in (self.scan_latest_button, self.scan_all_button, self.manual_button):
             row.addWidget(button)
         row.addSpacing(10)
         row.addWidget(QLabel("当前对局"))
@@ -413,7 +413,7 @@ class MainWindow(QMainWindow):
         self.empty_title.setObjectName("EmptyState")
         self.empty_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty_hint = QLabel(
-            "请先点击「最新完整录像」或「最近 7 天」扫描录像；也可以「手动选择…」单个 .wotreplay 文件。"
+            "请先点击「最新完整录像」扫描录像；也可以「手动选择…」单个 .wotreplay 文件。"
         )
         self.empty_hint.setObjectName("EmptyHint")
         self.empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -524,9 +524,7 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self) -> None:
         self.update_button.clicked.connect(self._on_update_clicked)
-        self.data_status_button.clicked.connect(self._on_data_status_clicked)
         self.scan_latest_button.clicked.connect(partial(self.start_scan, "latest"))
-        self.scan_recent_button.clicked.connect(partial(self.start_scan, "recent"))
         self.scan_all_button.clicked.connect(partial(self.start_scan, "all"))
         self.manual_button.clicked.connect(self._on_manual_clicked)
         self.redetect_button.clicked.connect(self._on_redetect_environment_clicked)
@@ -608,7 +606,11 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ 数据状态
     def _refresh_data_status(self) -> None:
-        """读取名单库状态（v0.3 起顶栏不再显示版本条，仅供状态页与提示使用）。"""
+        """读取名单库状态，缓存到 ``_data_status`` 供内部状态与状态页使用。
+
+        1.0 定稿：顶栏已无「数据状态」入口，本方法仅保留为内部状态刷新；
+        数据状态页仍可用 ``open_data_status()`` 直接打开（开发 / QA 脚本入口）。
+        """
         try:
             status = self.service.get_data_status()
         except ServiceError as exc:
@@ -616,9 +618,6 @@ class MainWindow(QMainWindow):
             return
         self._data_status = status
         self._refresh_status_dialog()
-
-    def _on_data_status_clicked(self) -> None:
-        self.open_data_status(modal=True)
 
     def open_data_status(self, modal: bool = True) -> Any:
         """打开名单库状态页（modal=True 模态；截图脚本用 modal=False）。"""
@@ -854,7 +853,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ 录像扫描
     def start_scan(self, mode: str = "latest") -> None:
-        """扫描录像（mode: latest / recent / all）。"""
+        """扫描录像（mode: latest / all；recent 能力仍保留在 service，1.0 UI 无入口）。"""
         if self._worker_running(self._scan_worker):
             return
         if not self.service.is_mock and not self.service.replay_dir_available():
@@ -875,7 +874,6 @@ class MainWindow(QMainWindow):
 
     def _set_scan_busy(self, busy: bool) -> None:
         self.scan_latest_button.setEnabled(not busy)
-        self.scan_recent_button.setEnabled(not busy)
         self.scan_all_button.setEnabled(not busy)
         self.manual_button.setEnabled(not busy)
         self.cancel_button.setVisible(busy)
@@ -1501,7 +1499,7 @@ class MainWindow(QMainWindow):
     def _apply_replay_dir_state(self) -> None:
         """录像区按 cfg.replay_dir 状态启用/禁用扫描，并给中文提示。"""
         available = self.service.replay_dir_available()
-        for button in (self.scan_latest_button, self.scan_recent_button, self.scan_all_button):
+        for button in (self.scan_latest_button, self.scan_all_button):
             button.setEnabled(available)
         replay_dir = getattr(self.service.cfg, "replay_dir", None)
         if not available:

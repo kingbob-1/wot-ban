@@ -19,6 +19,9 @@
   10) 本人（录像者）行浅蓝底 + 昵称加粗，封禁黄 / 红底色优先；
   11) 综合战绩只剩标题行右上角单个「刷新」按钮（force=True），非命中玩家也可点；
   12) 「当前对局」文案与下拉条目补本人本局车名（只显示名称、绝不显示代码）。
+- **第三轮 1.0 定稿 UI 精简**（task-10）：
+  13) 「最近 7 天」「数据状态」按钮移除、录像区扫描入口只剩 3 个、版本号 1.0.0；
+      DataStatusDialog / open_data_status() / get_data_status() 保留可用。
 """
 import os
 import sys
@@ -35,7 +38,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import pytest  # noqa: E402
 from PySide6.QtCore import Qt  # noqa: E402
-from PySide6.QtWidgets import QApplication, QPushButton  # noqa: E402
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton  # noqa: E402
 
 from src import models  # noqa: E402
 from src.config import Config, load_config  # noqa: E402
@@ -845,8 +848,10 @@ def test_query_result_area_has_no_tooltips(qapp):
         assert window.table.toolTip() == ""
         assert window.count_label.toolTip() == ""
         assert window.summary_label.toolTip() == ""
-        # 顶栏按钮 tooltip 保留（不在「查询结果」区域内）
-        assert window.update_button.toolTip() and window.data_status_button.toolTip()
+        # 顶栏按钮 tooltip 保留（不在「查询结果」区域内）；1.0 起顶栏只剩 3 个按钮
+        assert window.update_button.toolTip()
+        assert window.redetect_button.toolTip() and window.manual_game_button.toolTip()
+        assert not hasattr(window, "data_status_button")
         # 明细面板 tooltip 保留
         assert window.detail_panel.player_title.toolTip()
         assert window.detail_panel.refresh_player_stats_button.toolTip()
@@ -1060,7 +1065,8 @@ def test_main_window_mock_flow(qapp):
     window.show()
     qapp.processEvents()
 
-    # v0.3：顶栏不再显示数据版本条 / 模式徽标 / 本机环境路径（信息统一在「数据状态」页）
+    # v0.3：顶栏不再显示数据版本条 / 模式徽标 / 本机环境路径；1.0 起「数据状态」按钮也移除
+    # （数据状态页仅保留 open_data_status() 内部 / 脚本入口）
     assert window._data_status is not None and window._data_status.record_count == 322806
     assert not hasattr(window, "meta_labels") and not hasattr(window, "mode_hint")
     assert not hasattr(window, "env_game_label") and not hasattr(window, "env_account_label")
@@ -1279,6 +1285,66 @@ def test_application_version_from_config(qapp):
 
     app = create_application([])
     assert app.applicationVersion() == load_config().app_version
+
+
+def test_round3_final_ui_trim(qapp):
+    """第三轮 1.0 定稿：「最近 7 天」「数据状态」按钮移除，扫描入口 3 个，版本 1.0.0。"""
+    from src.ui.main_window import SCAN_MODE_LABELS, MainWindow
+    from src.ui.widgets import DataStatusDialog
+
+    # 1) 版本号定稿 1.0.0（配置唯一真源）
+    assert load_config().app_version == "1.0.0"
+
+    service = make_mock_service()
+    window = MainWindow(service)
+    window.resize(TARGET_WINDOW_WIDTH, TARGET_WINDOW_HEIGHT)
+    window.show()
+    try:
+        settle(qapp)
+        # 2) 窗口标题与顶栏版本标签显示 v1.0.0
+        assert window.windowTitle().endswith("v1.0.0"), window.windowTitle()
+        version_labels = [label.text() for label in window.findChildren(QLabel)
+                          if label.objectName() == "SubTitle"]
+        assert version_labels == ["v1.0.0"], version_labels
+
+        # 3) 两个按钮彻底移除：属性不存在，且全窗口按钮文案里也不存在
+        assert not hasattr(window, "scan_recent_button")
+        assert not hasattr(window, "data_status_button")
+        all_button_texts = [button.text() for button in window.findChildren(QPushButton)]
+        assert "最近 7 天" not in all_button_texts, all_button_texts
+        assert "数据状态" not in all_button_texts, all_button_texts
+
+        # 4) 顶栏只剩 3 个按钮：重新检测 / 手动选择游戏目录 / 更新名单
+        header = window.redetect_button.parentWidget()
+        header_texts = [button.text() for button in header.findChildren(QPushButton)]
+        assert header_texts == ["重新检测", "手动选择游戏目录", "更新名单"], header_texts
+
+        # 5) 录像区扫描入口只剩 3 个（「取消」按钮仅扫描中显示，不是扫描入口）
+        replay_bar = window.scan_latest_button.parentWidget()
+        scan_texts = [button.text() for button in replay_bar.findChildren(QPushButton)
+                      if button is not window.cancel_button]
+        assert scan_texts == ["最新完整录像", "全部录像", "手动选择…"], scan_texts
+        assert window.cancel_button.text() == "取消" and window.cancel_button.isHidden()
+        assert window.scan_latest_button.isEnabled() and window.scan_all_button.isEnabled()
+        assert window.manual_button.isEnabled()
+
+        # 6) SCAN_MODE_LABELS 去掉 recent；空态提示文案不再出现「最近 7 天」
+        assert list(SCAN_MODE_LABELS) == ["latest", "all", "file"], SCAN_MODE_LABELS
+        assert "最近 7 天" not in SCAN_MODE_LABELS.values()
+        hint = window.empty_hint.text()
+        assert "最新完整录像" in hint and "手动选择" in hint
+        assert "最近 7 天" not in hint, hint
+
+        # 7) 保留项：DataStatusDialog / open_data_status() / get_data_status() 仍可用
+        assert hasattr(window, "open_data_status") and hasattr(service, "get_data_status")
+        dialog = window.open_data_status(modal=False)
+        assert isinstance(dialog, DataStatusDialog)
+        qapp.processEvents()
+        dialog.close()
+        assert window._data_status is not None
+    finally:
+        window.close()
+        service.dispose()
 
 
 def test_auto_start_real_mode_with_fake_scan(qapp, monkeypatch, tmp_path):
