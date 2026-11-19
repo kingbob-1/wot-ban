@@ -72,6 +72,18 @@ class Config:
         "http://wotapp.ouj.com/?r=wotboxapi/battledetail&callback=cb&pn={nickname}&arena_id={arena_id}"
     )
     box_referer: str = "http://wotbox.ouj.com/"
+    # partial 录像反查 arena_id：盒子战斗日志页（每页 5 条）支持深翻页。
+    # 实测（2026-11-19）：p 可深翻到封顶页；从封顶页起会返回**完全重复**的同一份数据
+    # （约 1100 局 / 10 个月），因此**不线性逐页扫**：按 battle_time 估算页号 + 锚点校正，
+    # 探测时做「重复页检测」自动钉住 cap_page 并缓存，后续复用不再探测。
+    box_battlelog_max_pages: int = 1000      # 硬安全上限（超过即不再探测）
+    box_battlelog_cap_page: Optional[int] = None   # 已知封顶页（None=运行时自动探测）
+    box_battlelog_cap_probe_page: int = 240  # 自动探测封顶页时的首个探测页（用户记忆约 223）
+    box_battlelog_budget: int = 8            # 单局匹配的请求预算（含首页/封顶探测）
+    box_battlelog_interval_s: float = 3.0    # battleLog 相邻请求最小间隔（≥2s 限流口径）
+    box_battlelog_anchor_ttl_hours: float = 24.0   # 页→时间锚点跨进程复用有效期
+    # battleLog 只显示「MM-DD HH:MM」，与录像 battle_time 允许的分钟级容差（0=必须同分钟）。
+    box_battlelog_time_tolerance_minutes: int = 0
     # UA 必须使用实测可用值（Chrome/86 系）；换成 Chrome/120 会 403。
     box_user_agent: str = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -90,13 +102,16 @@ class Config:
     default_scan_days: int = 7
     full_scan_expected_count: int = 12851
     battle_stats_window_days: int = 180
+    # 玩家综合战绩缓存：默认「按自然日」（同一天内零请求、跨天过期）。
+    # 兼容旧配置：player_stats_cache_by_day=False 时退回按 player_stats_ttl_hours 计时。
+    player_stats_cache_by_day: bool = True
     player_stats_ttl_hours: float = 18.0
 
     # ------------------------------------------------------------ 界面
     app_name: str = "坦克世界封号案底查询工具"
     app_version: str = "0.2.0"
-    window_width: int = 1600
-    window_height: int = 900
+    window_width: int = 1920
+    window_height: int = 1080
 
     def __post_init__(self) -> None:
         """把路径字段统一解析为绝对路径（相对路径基于 project_root）；None 保持 None。"""

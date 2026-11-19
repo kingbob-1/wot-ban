@@ -20,7 +20,7 @@ from typing import Any, Optional
 
 try:
     from PySide6.QtCore import Qt, QTimer, QUrl
-    from PySide6.QtGui import QDesktopServices, QGuiApplication, QIcon
+    from PySide6.QtGui import QDesktopServices, QFont, QFontMetrics, QGuiApplication, QIcon
     from PySide6.QtWidgets import (
         QAbstractItemView,
         QApplication,
@@ -44,10 +44,9 @@ try:
     )
 except ImportError:  # 便于无 PySide6 环境下静态检查
     Qt = QApplication = QMainWindow = QWidget = QFrame = object  # type: ignore[assignment]
-    QTimer = QUrl = QDesktopServices = QIcon = None  # type: ignore[assignment]
+    QTimer = QUrl = QDesktopServices = QIcon = QFont = QFontMetrics = None  # type: ignore[assignment]
 
 try:
-    from .. import models
     from ..app.service import (
         AppService,
         ServiceError,
@@ -59,7 +58,6 @@ try:
     from .table_model import (
         COLUMNS,
         COLUMN_INDEX,
-        STATS_STATE_LOADING,
         STATS_STATE_READY,
         STATS_STATE_UNAVAILABLE,
         PlayerTableModel,
@@ -67,7 +65,6 @@ try:
     from .widgets import DataStatusDialog, PlayerDetailPanel, ScrollableComboBox
 except ImportError:  # 直接以脚本方式运行时的兜底
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from src import models
     from src.app.service import (
         AppService,
         ServiceError,
@@ -79,7 +76,6 @@ except ImportError:  # 直接以脚本方式运行时的兜底
     from src.ui.table_model import (
         COLUMNS,
         COLUMN_INDEX,
-        STATS_STATE_LOADING,
         STATS_STATE_READY,
         STATS_STATE_UNAVAILABLE,
         PlayerTableModel,
@@ -87,6 +83,18 @@ except ImportError:  # 直接以脚本方式运行时的兜底
     from src.ui.widgets import DataStatusDialog, PlayerDetailPanel, ScrollableComboBox
 
 SCAN_MODE_LABELS = {"latest": "最新完整录像", "recent": "最近 7 天", "all": "全部录像", "file": "手动选择"}
+
+# 「查询结果」标题行：本局胜负平文案（胜绿 / 平橙 / 负红，见 theme.APP_QSS）。
+RESULT_TITLE_BASE = "查询结果"
+OUTCOME_KIND_MAP = {"胜利": "victory", "胜": "victory", "平局": "draw", "平": "draw",
+                    "失败": "defeat", "负": "defeat"}
+OUTCOME_TITLE_KINDS = ("victory", "draw", "defeat", "loading")
+
+# 结果表行高 / 字号（小字号 + 紧凑行高）：30 人 + 2 组头 = 32 行，在 1920×1080
+# 默认窗口下一屏显示且不出现垂直滚动条；60 人（62 行）保留垂直滚动条，视口约 30 名玩家。
+RESULT_FONT_POINT_SIZE = 7.5
+RESULT_ROW_HEIGHT = 24
+RESULT_HEADER_HEIGHT = 26
 
 # 窗口默认 / 最小尺寸（16:9）。默认 1920×1080；屏幕可用区域不足时等比收缩。
 DEFAULT_WINDOW_WIDTH = 1920
@@ -171,9 +179,10 @@ def create_application(argv: Optional[list] = None) -> Any:
     return app
 
 
-def default_window_size() -> tuple:
-    """默认 1920×1080（16:9）；屏幕可用区域不足时等比收缩。"""
-    width, height = DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT
+def default_window_size(cfg: Any = None) -> tuple:
+    """默认 1920×1080（16:9，取 ``Config.window_width/height``）；屏幕不足时等比收缩。"""
+    width = int(getattr(cfg, "window_width", DEFAULT_WINDOW_WIDTH) or DEFAULT_WINDOW_WIDTH)
+    height = int(getattr(cfg, "window_height", DEFAULT_WINDOW_HEIGHT) or DEFAULT_WINDOW_HEIGHT)
     screen = QApplication.primaryScreen()
     if screen is not None:
         available = screen.availableGeometry()
@@ -211,6 +220,11 @@ class MainWindow(QMainWindow):
         self._update_timer: Any = None
         self._query_seq = 0
         self._scan_mode = "latest"
+        # 综合战绩：本会话内缓存（选中玩家只展示缓存，不发请求）+ 胜负平标题状态。
+        self._player_stats_cache: dict = {}
+        self._player_stats_pending: Any = None
+        self._outcome_label = ""
+        self._outcome_kind = ""
         self._build_ui()
         self._apply_window_geometry()
         self._connect_signals()
@@ -242,7 +256,7 @@ class MainWindow(QMainWindow):
         header = QFrame()
         header.setObjectName("Header")
         layout = QHBoxLayout(header)
-        layout.setContentsMargins(18, 10, 18, 10)
+        layout.setContentsMargins(18, 8, 18, 8)
         layout.setSpacing(10)
 
         title = QLabel(self.service.cfg.app_name)
@@ -271,8 +285,8 @@ class MainWindow(QMainWindow):
         card = QFrame()
         card.setObjectName("Card")
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(14, 10, 14, 10)
-        layout.setSpacing(7)
+        layout.setContentsMargins(14, 8, 14, 8)
+        layout.setSpacing(6)
 
         row = QHBoxLayout()
         row.setSpacing(8)
@@ -318,7 +332,7 @@ class MainWindow(QMainWindow):
     def _build_body(self) -> Any:
         container = QWidget()
         layout = QVBoxLayout(container)
-        layout.setContentsMargins(12, 10, 12, 6)
+        layout.setContentsMargins(12, 8, 12, 4)
         layout.setSpacing(0)
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
         self._splitter.setChildrenCollapsible(False)
@@ -326,7 +340,7 @@ class MainWindow(QMainWindow):
         self._splitter.addWidget(self._build_detail_area())
         self._splitter.setStretchFactor(0, 1)
         self._splitter.setStretchFactor(1, 0)
-        self._splitter.setSizes([1120, 480])
+        self._splitter.setSizes([1420, 500])
         layout.addWidget(self._splitter)
         return container
 
@@ -334,14 +348,16 @@ class MainWindow(QMainWindow):
         card = QFrame()
         card.setObjectName("Card")
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(10, 8, 10, 6)
+        layout.setSpacing(6)
 
         filter_row = QHBoxLayout()
         filter_row.setSpacing(10)
-        title = QLabel("查询结果")
-        title.setObjectName("SectionTitle")
-        filter_row.addWidget(title)
+        # 「查询结果」标题行：异步战绩到达后追加「· 平局 14v6」并染色（需求 4）。
+        self.result_title = QLabel(RESULT_TITLE_BASE)
+        self.result_title.setObjectName("SectionTitle")
+        self.result_title.setToolTip("本局胜负平来自偶游盒子当局战绩（异步加载）；录像本身不包含比分")
+        filter_row.addWidget(self.result_title)
         self.id_only_check = QCheckBox("仅看 ID 命中")
         self.id_only_check.setToolTip("只显示完整录像 dbid 与名单 wgid 精确匹配的玩家（A2 口径下默认不启用）")
         self.hits_only_check = QCheckBox("只看命中")
@@ -380,6 +396,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(empty_widget)
 
         self.table = QTableView()
+        self.table.setObjectName("ResultTable")
         self.table.setModel(self.model)
         self.table.setSortingEnabled(True)
         self.table.setAlternatingRowColors(True)
@@ -388,19 +405,38 @@ class MainWindow(QMainWindow):
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setWordWrap(False)
+        self.table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(30)
+        self.table.verticalHeader().setDefaultSectionSize(RESULT_ROW_HEIGHT)
+        self.table.verticalHeader().setMinimumSectionSize(18)
         header = self.table.horizontalHeader()
         header.setHighlightSections(False)
         header.setStretchLastSection(False)
         header.setSortIndicatorShown(True)
+        header.setFixedHeight(RESULT_HEADER_HEIGHT)
+        header.setMinimumSectionSize(28)
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        # 结果表 7.5pt 小字号（24 列 + 30 人一屏）；代码设置兜底 QSS 字体（跨平台字体度量差异）。
+        if QFont is not None:
+            table_font = QFont(theme.FONT_FAMILY)
+            table_font.setPointSizeF(RESULT_FONT_POINT_SIZE)
+            self.table.setFont(table_font)
+            header.setFont(table_font)
         for index, column in enumerate(COLUMNS):
             self.table.setColumnWidth(index, column["width"])
+        # 表头标题逐字完整显示兜底：列宽不小于「标题文字宽度 + 内边距」（字体度量差异时自动加宽）。
+        if QFontMetrics is not None:
+            metrics_font = QFont(theme.FONT_FAMILY) if QFont is not None else header.font()
+            if QFont is not None:
+                metrics_font.setPointSizeF(RESULT_FONT_POINT_SIZE)
+            metrics = QFontMetrics(metrics_font)
+            for index, column in enumerate(COLUMNS):
+                need = metrics.horizontalAdvance(column["title"]) + 6
+                if need > self.table.columnWidth(index):
+                    self.table.setColumnWidth(index, need)
         header.setSectionResizeMode(COLUMN_INDEX["reason"], QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSortIndicator(
-            COLUMN_INDEX["ban_count"], Qt.SortOrder.DescendingOrder
-        )
+        header.setSortIndicator(COLUMN_INDEX["ban_count"], Qt.SortOrder.DescendingOrder)
         self.stack.addWidget(self.table)
         layout.addWidget(self.stack, 1)
 
@@ -412,14 +448,14 @@ class MainWindow(QMainWindow):
 
     def _build_detail_area(self) -> Any:
         self.detail_panel = PlayerDetailPanel()
-        self.detail_panel.setMinimumWidth(460)
+        self.detail_panel.setMinimumWidth(430)
         return self.detail_panel
 
     def _build_footer(self) -> Any:
         footer = QFrame()
         footer.setObjectName("Footer")
         layout = QHBoxLayout(footer)
-        layout.setContentsMargins(18, 8, 18, 8)
+        layout.setContentsMargins(18, 6, 18, 6)
         disclaimer = QLabel(theme.DISCLAIMER_TEXT)
         disclaimer.setObjectName("Disclaimer")
         disclaimer.setWordWrap(True)
@@ -427,7 +463,7 @@ class MainWindow(QMainWindow):
         return footer
 
     def _apply_window_geometry(self) -> None:
-        width, height = default_window_size()
+        width, height = default_window_size(self.service.cfg)
         self.resize(width, height)
         self.setMinimumSize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
         screen = QApplication.primaryScreen()
@@ -439,13 +475,16 @@ class MainWindow(QMainWindow):
             )
 
     def _apply_splitter_sizes(self) -> None:
-        """按窗口实际宽度分配左右比例：结果表约 70%，明细面板约 30%（最小 460）。"""
+        """按窗口实际宽度分配左右比例：结果表约 74%，明细面板约 26%（最小 430）。
+
+        结果表 24 列在 1920 逻辑像素下尽量一屏横向放下；明细面板保持紧凑多列。
+        """
         if not hasattr(self, "_splitter"):
             return
         total = self._splitter.width()
         if total <= 0:
             return
-        right = max(460, int(total * 0.30))
+        right = max(430, int(total * 0.26))
         left = max(600, total - right - self._splitter.handleWidth())
         self._splitter.setSizes([left, right])
 
@@ -468,8 +507,14 @@ class MainWindow(QMainWindow):
         self.hits_only_check.stateChanged.connect(self._on_filter_changed)
         self.level_combo.currentIndexChanged.connect(self._on_filter_changed)
         self.table.selectionModel().currentRowChanged.connect(self._on_current_row_changed)
+        # 模型行结构变化（查询 / 筛选 / 战绩到达后重排）后重新跨列合并组头行。
+        self.model.modelReset.connect(self._apply_group_spans)
         if self.detail_panel.player_stats_requested is not None:
             self.detail_panel.player_stats_requested.connect(self._on_player_stats_requested)
+        if self.detail_panel.player_stats_refresh_requested is not None:
+            self.detail_panel.player_stats_refresh_requested.connect(
+                partial(self._on_player_stats_requested, force=True)
+            )
 
     # ------------------------------------------------------------ 后台 worker
     def _start_worker(self, title: str, fn: Any, on_success: Any, on_error: Any = None,
@@ -821,7 +866,7 @@ class MainWindow(QMainWindow):
         self.replay_combo.blockSignals(True)
         self.replay_combo.clear()
         for replay in self._current_replays:
-            self.replay_combo.addItem(replay_label(replay), replay.path)
+            self.replay_combo.addItem(self._localized_replay_label(replay), replay.path)
         target_index = 0
         if self._current_replays:
             if mode == "latest":
@@ -909,7 +954,7 @@ class MainWindow(QMainWindow):
                     self.replay_combo.setCurrentIndex(existing[0])
                 else:
                     self._current_replays.insert(0, replay)
-                    self.replay_combo.insertItem(0, replay_label(replay), replay.path)
+                    self.replay_combo.insertItem(0, self._localized_replay_label(replay), replay.path)
                     self.replay_combo.setCurrentIndex(0)
             self.progress_label.setText("已载入手动选择的录像：%s" % Path(replay_path).name)
         else:
@@ -933,6 +978,7 @@ class MainWindow(QMainWindow):
         seq = self._query_seq
         self._set_query_busy(True)
         self.model.set_stats("idle")
+        self._set_outcome_title("", "", kind="")
         fn = lambda progress, should_cancel: self.service.query_replay(path)  # noqa: E731
         self._query_worker = self._start_worker(
             "查询录像", fn,
@@ -953,15 +999,17 @@ class MainWindow(QMainWindow):
             return
         self._set_query_busy(False)
         self._query_result = result
-        self.model.set_rows(result.matches)
+        # 新对局：标题先回到基础文案（胜负平随异步战绩到达后再显示）。
+        self._set_outcome_title("", "", kind="")
+        self.model.set_rows(result.matches, result.replay)
         self._apply_filters()
         self.stack.setCurrentIndex(1)
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(100)
         self.progress_label.setText(result.message)
         self.statusBar().showMessage(result.message, 10000)
-        if self.model.rowCount() > 0:
-            self.table.selectRow(0)
+        self._refresh_current_replay_label(result.replay)
+        self._select_first_player()
         self._refresh_summary()
         self._request_battle_stats(seq, result.replay)
 
@@ -975,12 +1023,10 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ 当局战绩
     def _request_battle_stats(self, seq: int, detail: Any) -> None:
-        """按需请求当局战绩（A7：打开某局才请求；partial / 超期不请求）。"""
+        """按需请求当局战绩（打开某局才请求；partial 局同样异步请求，由数据层决定）。"""
         if detail is None:
             return
-        if detail.is_partial:
-            self._set_battle_unavailable("partial 录像没有 arena_unique_id，无法取当局战绩（仅完整录像可查）")
-            return
+        self._set_outcome_title("", "", kind="loading")
         fn = lambda progress, should_cancel: self.service.get_battle_stats(detail)  # noqa: E731
         self._battle_worker = self._start_worker(
             "获取当局战绩", fn,
@@ -991,6 +1037,7 @@ class MainWindow(QMainWindow):
     def _on_battle_finished(self, seq: int, result: Any) -> None:
         if seq != self._query_seq:
             return
+        selected = self.selected_player()
         if getattr(result, "available", False) and getattr(result, "stats", None) is not None:
             stats_map = {}
             for player in getattr(result.stats, "players", []) or []:
@@ -1000,7 +1047,14 @@ class MainWindow(QMainWindow):
                     stats_map[("nick", player.nickname)] = player
             self.model.set_stats(STATS_STATE_READY, stats_map, getattr(result, "message", ""))
         else:
-            self._set_battle_unavailable(getattr(result, "message", "当局战绩不可用"))
+            self.model.set_stats(
+                STATS_STATE_UNAVAILABLE, {},
+                getattr(result, "message", "当局战绩不可用"),
+            )
+        # 胜负平：优先 BattleStatsResult.outcome_label/score（partial 局也可用），
+        # 盒子不可用时数据层仍会用录像 winner_team 给出 outcome_label。
+        self._apply_outcome_from_result(result)
+        self._reselect_player(selected)
         self._refresh_selected_detail()
 
     def _on_battle_failed(self, seq: int, message: str) -> None:
@@ -1009,9 +1063,117 @@ class MainWindow(QMainWindow):
         self._set_battle_unavailable(message)
 
     def _set_battle_unavailable(self, message: str) -> None:
+        selected = self.selected_player()
         self.model.set_stats(STATS_STATE_UNAVAILABLE, {}, message)
+        self._set_outcome_title("", "", kind="")
         self.statusBar().showMessage(message, 10000)
+        self._reselect_player(selected)
         self._refresh_selected_detail()
+
+    def _apply_outcome_from_result(self, result: Any) -> None:
+        """从 BattleStatsResult（或 BattleStats）提取胜负平文案并更新标题行。"""
+        stats = getattr(result, "stats", None)
+        label = getattr(result, "outcome_label", "") or getattr(stats, "outcome_label", "") or ""
+        score = getattr(result, "score", "") or getattr(stats, "score", "") or ""
+        label = str(label).strip()
+        score = str(score).strip()
+        if not label:
+            self._set_outcome_title("", "", kind="")
+            return
+        kind = OUTCOME_KIND_MAP.get(label, "")
+        self._set_outcome_title(label, score, kind)
+
+    def _set_outcome_title(self, label: str, score: str = "", kind: str = "") -> None:
+        """更新「查询结果」标题行：胜利绿 / 平局橙 / 失败红；加载中灰色占位。"""
+        self._outcome_label = label or ""
+        self._outcome_kind = kind or ""
+        if label:
+            text = "%s · %s" % (RESULT_TITLE_BASE, label)
+            if score:
+                text += " %s" % score
+        elif kind == "loading":
+            text = "%s · 战绩加载中…" % RESULT_TITLE_BASE
+        else:
+            text = RESULT_TITLE_BASE
+        self.result_title.setText(text)
+        self.result_title.setProperty("outcome", kind if kind in OUTCOME_TITLE_KINDS else "")
+        style = self.result_title.style()
+        style.unpolish(self.result_title)
+        style.polish(self.result_title)
+        self.result_title.update()
+
+    def current_outcome_text(self) -> str:
+        """「查询结果」标题行当前文案（测试 / 截图脚本用）。"""
+        return self.result_title.text()
+
+    # ------------------------------------------------------------ 分组 / 地图名辅助
+    def _apply_group_spans(self) -> None:
+        """组头行跨列合并（跨全部列），不参与排序 / 明细联动。"""
+        if not hasattr(self, "table") or not hasattr(self, "model"):
+            return
+        self.table.clearSpans()
+        column_count = len(COLUMNS)
+        for row in range(self.model.rowCount()):
+            if self.model.is_group_row(row):
+                self.table.setSpan(row, 0, 1, column_count)
+
+    @staticmethod
+    def _localized_map_name(code: Any) -> str:
+        """地图代码 -> 游戏中文名；映射模块缺失 / 无结果时原样返回（不显示报错）。"""
+        if not code:
+            return ""
+        text = str(code)
+        try:
+            from .. import game_names  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 - 模块未交付时优雅降级
+            try:
+                from src import game_names  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001
+                return text
+        try:
+            name = game_names.map_name(text)
+        except Exception:  # noqa: BLE001 - 映射失败不影响界面
+            return text
+        return str(name) if name else text
+
+    def _localized_replay_label(self, replay: Any) -> str:
+        """录像下拉文案：优先 detail.map_display_name，其次 game_names 中文名兜底。"""
+        if replay is None:
+            return ""
+        base = replay_label(replay)
+        raw = getattr(replay, "map_name", None)
+        display = getattr(replay, "map_display_name", None) or self._localized_map_name(raw)
+        if raw and display and str(display) != str(raw):
+            base = base.replace(str(raw), str(display), 1)
+        return base
+
+    def _refresh_current_replay_label(self, detail: Any) -> None:
+        """查询完成后用 detail 的地图中文名刷新「当前对局」下拉文案（需求 5）。"""
+        if detail is None:
+            return
+        index = self.replay_combo.currentIndex()
+        if index < 0:
+            return
+        self.replay_combo.setItemText(index, self._localized_replay_label(detail))
+
+    # ------------------------------------------------------------ 选中行辅助
+    def _select_first_player(self) -> None:
+        """选中第一名玩家行（跳过组头行）。"""
+        row = self.model.first_player_row()
+        if row >= 0:
+            self.table.selectRow(row)
+        else:
+            self.detail_panel.clear()
+
+    def _reselect_player(self, player: Any) -> None:
+        """模型重建后尽量恢复原选中玩家（找不到则选第一名玩家）。"""
+        row = self.model.row_for_player(player) if player is not None else -1
+        if row < 0:
+            row = self.model.first_player_row()
+        if row >= 0:
+            self.table.selectRow(row)
+        else:
+            self.detail_panel.clear()
 
     # ------------------------------------------------------------ 筛选 / 选中 / 汇总
     def _apply_filters(self) -> None:
@@ -1022,33 +1184,42 @@ class MainWindow(QMainWindow):
         self.model.apply_filters(id_only=id_only, hits_only=hits_only, level=level)
 
     def _on_filter_changed(self) -> None:
+        selected = self.selected_player()
         self._apply_filters()
         self._refresh_summary()
-        if self.model.rowCount() > 0:
-            self.table.selectRow(0)
-        else:
-            self.detail_panel.clear()
+        self._reselect_player(selected)
 
     def _on_current_row_changed(self, current: Any, previous: Any = None) -> None:
         if not getattr(current, "isValid", lambda: False)():
             self.detail_panel.clear()
             return
-        player = self.model.row_object(current.row())
+        row = current.row()
+        if self.model.is_group_row(row):
+            # 组头行不参与明细联动（仅作分组标识）。
+            return
+        self._show_player_detail(self.model.row_object(row))
+
+    def _show_player_detail(self, player: Any) -> None:
+        """刷新右侧明细：封禁记录 + 当局战绩 + 已有缓存综合战绩（不发请求）。"""
+        if player is None:
+            self.detail_panel.clear()
+            return
         self.detail_panel.set_player(
-            player, self.model.stats_map(), self.model.stats_state(), self.model.stats_message()
+            player, self.model.stats_map(), self.model.stats_state(), self.model.stats_message(),
+            recorder_team=self.model.recorder_team(),
         )
+        self._show_cached_player_stats(player)
 
     def _refresh_selected_detail(self) -> None:
         current = self.table.currentIndex()
-        if not current.isValid():
+        if not current.isValid() or self.model.is_group_row(current.row()):
             return
-        player = self.model.row_object(current.row())
-        self.detail_panel.set_player(
-            player, self.model.stats_map(), self.model.stats_state(), self.model.stats_message()
-        )
+        self._show_player_detail(self.model.row_object(current.row()))
 
     def _refresh_summary(self) -> None:
-        self.count_label.setText("显示 %d / %d 人" % (self.model.rowCount(), len(self.model.total_rows())))
+        visible = self.model.player_row_count()
+        total = self.model.total_player_count()
+        self.count_label.setText("显示 %d / %d 人" % (visible, total))
         if self._query_result is None:
             self.summary_label.setText("—")
             return
@@ -1060,30 +1231,86 @@ class MainWindow(QMainWindow):
         )
         if self._query_result.is_partial:
             text += " · partial 录像：仅昵称匹配（同昵称视为同一人，计入黄/红）"
-        if self.model.rowCount() != summary["total"]:
-            text += " · 当前筛选显示 %d 人" % self.model.rowCount()
-        text += " · 默认按封禁次数降序、同次数最近封禁日期降序"
+        if visible != summary["total"]:
+            text += " · 当前筛选显示 %d 人" % visible
+        text += " · 默认按封禁次数降序 → 本局战力降序 → 伤害降序（None 置后）"
         self.summary_label.setText(text)
 
-    # ------------------------------------------------------------ 综合战绩点查
-    def _on_player_stats_requested(self, player: Any) -> None:
+    # ------------------------------------------------------------ 综合战绩点查 / 刷新
+    @staticmethod
+    def _player_stats_key(player: Any) -> tuple:
+        if player is None:
+            return ("none", "")
+        dbid = getattr(player, "dbid", None)
+        if dbid is not None:
+            return ("id", int(dbid))
+        return ("nick", getattr(player, "nickname", "") or "")
+
+    def _peek_cached_player_stats(self, player: Any) -> Any:
+        """只读探测数据层已缓存的综合战绩（不得触发网络请求）。
+
+        数据层若提供 ``peek_player_stats_cache`` / ``get_cached_player_stats`` 之类的
+        只读接口则直接使用；否则返回 None（界面仅展示本会话缓存）。
+        """
+        for name in ("peek_player_stats_cache", "get_cached_player_stats", "peek_player_stats"):
+            probe = getattr(self.service, name, None)
+            if not callable(probe):
+                continue
+            try:
+                result = probe(player)
+            except Exception:  # noqa: BLE001 - 探测失败按无缓存处理
+                return None
+            if result is not None:
+                return result
+        return None
+
+    def _show_cached_player_stats(self, player: Any) -> None:
+        """选中玩家：有缓存直接展示（含更新时间 / 缓存时间），无缓存保持空态、不发请求。"""
+        if player is None:
+            return
+        key = self._player_stats_key(player)
+        cached = self._player_stats_cache.get(key)
+        if cached is None:
+            cached = self._peek_cached_player_stats(player)
+            if cached is not None:
+                self._player_stats_cache[key] = cached
+        if cached is not None:
+            self.detail_panel.show_player_stats(cached, from_cache=True)
+
+    def _on_player_stats_requested(self, player: Any, force: bool = False) -> None:
+        """手动查看（缓存优先）/ 强制刷新综合战绩；选中玩家不会自动触发。"""
         if player is None:
             return
         if self._worker_running(self._player_stats_worker):
             return
-        self.detail_panel.set_player_stats_loading()
-        fn = lambda progress, should_cancel: self.service.get_player_stats(player)  # noqa: E731
+        self._player_stats_pending = player
+        self.detail_panel.set_player_stats_loading(refresh=bool(force))
+        fn = lambda progress, should_cancel: self.service.get_player_stats(  # noqa: E731
+            player, force=bool(force)
+        )
         self._player_stats_worker = self._start_worker(
-            "点查综合战绩", fn,
+            "刷新综合战绩" if force else "查看综合战绩", fn,
             on_success=self._on_player_stats_finished,
             on_error=self._on_player_stats_failed,
         )
 
     def _on_player_stats_finished(self, result: Any) -> None:
+        player = self._player_stats_pending
+        self._player_stats_pending = None
+        if player is not None and getattr(result, "available", False):
+            self._player_stats_cache[self._player_stats_key(player)] = result
+        message = getattr(result, "message", "综合战绩查询完成")
+        current = self.selected_player()
+        if (player is None or current is None
+                or self._player_stats_key(current) != self._player_stats_key(player)):
+            # 结果不属于当前选中玩家：只写入缓存，不改动明细面板。
+            self.statusBar().showMessage(message, 10000)
+            return
         self.detail_panel.show_player_stats(result)
-        self.statusBar().showMessage(getattr(result, "message", "综合战绩查询完成"), 10000)
+        self.statusBar().showMessage(message, 10000)
 
     def _on_player_stats_failed(self, message: str) -> None:
+        self._player_stats_pending = None
         self.detail_panel.show_player_stats(None)
         self.statusBar().showMessage(message, 10000)
 
@@ -1094,6 +1321,7 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(0)
         self.summary_label.setText("—")
         self.count_label.setText("—")
+        self._set_outcome_title("", "", kind="")
 
     def _show_error(self, title: str, message: str) -> None:
         self.statusBar().showMessage("%s：%s" % (title, message), 15000)

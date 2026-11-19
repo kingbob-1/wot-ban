@@ -1,29 +1,35 @@
 # -*- coding: utf-8 -*-
-"""结果表数据模型：单局参战玩家 + 封禁匹配 + 当局战绩列。
+"""结果表数据模型：单局参战玩家 + 封禁匹配 + 盒子同款当局战绩列。
 
 设计
 ----
-- ``QAbstractTableModel`` + 视图排序（表头点击 -> ``sort()``），30 人规模但保持
-  可扩展到 60 人 / 多局；
-- 黄底（1 次封禁）/ 红底（≥2 次封禁）由 ``BackgroundRole`` 提供，匹配方式标签
-  文案含「ID 确认 / 昵称匹配 / 仅昵称匹配」；
-- 默认排序：封禁次数降序 -> 同次数按最近封禁日期降序 -> ID 确认置前（A4 + §6.6）；
-- 「仅看 ID 命中」「只看命中」「黄/红筛选」在模型内过滤（模型行 = 可见行）；
-- 当局战绩列由 ``set_stats()`` 填充，带「加载中 / 不可用」占位。
+- ``QAbstractTableModel`` + 视图排序（表头点击 -> ``sort()``），30 人 / 60 人
+  均可扩展；
+- **列契约（顺序固定、标题逐字）**：删除旧「阵营」「命中率」列，按盒子明细顺序
+  重排为 24 列（昵称 … 行驶里程），见 ``COLUMNS``；
+- **红绿方分组**：绿方 = 录像者本人所在队（由 ``ReplayDetail.recorder_dbid /
+  recorder_name`` 在 players 中反查，**不写死 team==1**），绿方组在上；两组之间
+  插入组头行（视图跨列合并，不参与排序）；60 人对局同样两组；
+- **默认排序（组内）**：封禁次数降序 -> 本局战力降序 -> 伤害降序（None 置后）；
+  表头点击只在组内改排序，组头 / 组顺序不动；
+- 黄底（1 次封禁）/ 红底（≥2 次封禁）由 ``BackgroundRole`` 提供；组头行用
+  绿 / 红浅底 + 加粗；
+- 当局战绩列由 ``set_stats()`` 填充，缺失字段显示「—」，加载中显示「…」；
+- 「仅看 ID 命中」「只看命中」「黄/红筛选」在模型内过滤（模型行 = 可见行）。
 """
 from __future__ import annotations
 
 import sys
-from functools import cmp_to_key, partial
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from functools import cmp_to_key
 from pathlib import Path
 from typing import Any, Optional
 
 try:
-    from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
+    from PySide6.QtCore import QAbstractTableModel, Qt
     from PySide6.QtGui import QColor, QFont
 except ImportError:  # 便于无 PySide6 环境下静态检查
     QAbstractTableModel = object  # type: ignore[assignment]
-    QModelIndex = object  # type: ignore[assignment]
     QColor = QFont = None  # type: ignore[assignment]
     Qt = None  # type: ignore[assignment]
 
@@ -33,30 +39,66 @@ except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from src import models
 
-# 列定义：key / 表头 / 默认宽度 / 对齐 / 是否当局战绩列。
-# 宽度按 1600 逻辑像素窗口（4K 150% 缩放）内可完整显示 14 列来压缩。
+# 列定义：key / 表头 / 默认宽度 / 对齐。
+# 宽度按 1920×1080 默认窗口（右侧明细约 26%）压缩：7.5pt 字体下 24 列表头逐字完整、
+# 横向不出现滚动条；行高 24px 保证 30 人（+2 组头）一屏完整显示（需求 6）。
 COLUMNS = [
-    {"key": "team", "title": "阵营", "width": 46, "align": "center"},
-    {"key": "nickname", "title": "昵称", "width": 138, "align": "left"},
-    {"key": "dbid", "title": "账号 ID", "width": 104, "align": "left"},
-    {"key": "clan_abbrev", "title": "军团缩写", "width": 70, "align": "center"},
-    {"key": "ban_count", "title": "封禁次数", "width": 74, "align": "center"},
-    {"key": "latest_ban_day", "title": "最近封禁日期", "width": 98, "align": "center"},
-    {"key": "reason", "title": "原因", "width": 112, "align": "left"},
-    {"key": "duration", "title": "时长", "width": 58, "align": "center"},
-    {"key": "match_type", "title": "匹配方式", "width": 94, "align": "center"},
-    {"key": "combat", "title": "本局战力", "width": 70, "align": "right"},
-    {"key": "damage", "title": "伤害", "width": 64, "align": "right"},
-    {"key": "kills", "title": "击杀", "width": 48, "align": "right"},
-    {"key": "xp", "title": "经验", "width": 56, "align": "right"},
-    {"key": "hit_rate", "title": "命中率", "width": 62, "align": "right"},
+    {"key": "nickname", "title": "昵称", "width": 80, "align": "left"},
+    {"key": "dbid", "title": "账号 ID", "width": 72, "align": "left"},
+    {"key": "clan_abbrev", "title": "军团缩写", "width": 46, "align": "center"},
+    {"key": "ban_count", "title": "封禁次数", "width": 46, "align": "center"},
+    {"key": "latest_ban_day", "title": "最近封禁日期", "width": 68, "align": "center"},
+    {"key": "reason", "title": "原因", "width": 56, "align": "left"},
+    {"key": "duration", "title": "时长", "width": 34, "align": "center"},
+    {"key": "match_type", "title": "匹配方式", "width": 56, "align": "center"},
+    {"key": "vehicle", "title": "车型", "width": 66, "align": "left"},
+    {"key": "combat", "title": "本局战力", "width": 46, "align": "right"},
+    {"key": "xp", "title": "经验值", "width": 36, "align": "right"},
+    {"key": "shots", "title": "射击", "width": 28, "align": "right"},
+    {"key": "piercings", "title": "击穿", "width": 28, "align": "right"},
+    {"key": "damage", "title": "造成伤害", "width": 46, "align": "right"},
+    {"key": "hits_received", "title": "被击中", "width": 36, "align": "right"},
+    {"key": "potential_damage", "title": "受到的潜在伤害", "width": 72, "align": "right"},
+    {"key": "damage_blocked", "title": "装甲抵消伤害", "width": 62, "align": "right"},
+    {"key": "spotted", "title": "发现敌人", "width": 46, "align": "right"},
+    {"key": "vehicles_damaged", "title": "击伤敌方战车", "width": 62, "align": "right"},
+    {"key": "kills", "title": "击毁敌方战车", "width": 62, "align": "right"},
+    {"key": "assisted_damage", "title": "协助盟友造成伤害", "width": 80, "align": "right"},
+    {"key": "capture_points", "title": "占领敌方基地点数", "width": 80, "align": "right"},
+    {"key": "defense_points", "title": "保卫基地防御点数", "width": 80, "align": "right"},
+    {"key": "mileage", "title": "行驶里程", "width": 46, "align": "right"},
 ]
 COLUMN_INDEX = {item["key"]: index for index, item in enumerate(COLUMNS)}
-STATS_KEYS = ("combat", "damage", "kills", "xp", "hit_rate")
+
+# 需要当局战绩数据的列（用于 tooltip / 排序取值）。
+STATS_KEYS = (
+    "combat", "xp", "shots", "piercings", "damage", "hits_received",
+    "potential_damage", "damage_blocked", "spotted", "vehicles_damaged",
+    "kills", "assisted_damage", "capture_points", "defense_points", "mileage",
+)
+
+# 当局战绩列在 BattlePlayerStats 中的字段名（vehicle / combat 单独处理）。
+_STATS_FIELD_KEYS = set(STATS_KEYS) - {"combat"}
+
 STATS_STATE_IDLE = "idle"
 STATS_STATE_LOADING = "loading"
 STATS_STATE_READY = "ready"
 STATS_STATE_UNAVAILABLE = "unavailable"
+
+# 分组：绿方 = 录像者本人所在队（我方），红方 = 敌方。
+GROUP_GREEN = "green"
+GROUP_RED = "red"
+GROUP_LABELS = {
+    GROUP_GREEN: "绿方 · 我方",
+    GROUP_RED: "红方 · 敌方",
+}
+
+# 默认排序链：封禁次数降序 -> 本局战力降序 -> 伤害降序（None 置后）。
+DEFAULT_SORT_CHAIN = (
+    ("ban_count", False),
+    ("combat", False),
+    ("damage", False),
+)
 
 MATCH_LABEL_ID = "ID 确认"
 MATCH_LABEL_NICKNAME = "昵称匹配"
@@ -71,8 +113,9 @@ TOOLTIPS = {
 }
 
 
+# ---------------------------------------------------------------- 格式化工具
 def _format_number(value: Any) -> str:
-    """整数加千分位；None -> 占位符。"""
+    """整数加千分位；None / 非数字 -> 占位符 / 原值。"""
     if value is None:
         return "—"
     try:
@@ -81,17 +124,100 @@ def _format_number(value: Any) -> str:
         return str(value)
 
 
-def _format_combat(value: Any) -> str:
-    """单局战力（盒子口径，可能是小数）。"""
+def format_combat_int(value: Any) -> str:
+    """本局战力：四舍五入取整（half-up，868.46 -> 868、216.3 -> 216）。
+
+    使用 ``Decimal(str(value))`` 做十进制 half-up，避免二进制浮点在 .5 边界上的
+    舍入偏差；非数字返回原值字符串，None 返回「—」。
+    """
     if value is None:
         return "—"
     try:
-        number = float(value)
-    except (TypeError, ValueError):
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
         return str(value)
-    if abs(number - round(number)) < 0.05:
-        return "{:,}".format(int(round(number)))
-    return "{:,.1f}".format(number)
+    try:
+        rounded = number.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError):
+        return str(value)
+    try:
+        return "{:,}".format(int(rounded))
+    except (ValueError, OverflowError):
+        return str(rounded)
+
+
+def _stat_value(stats: Any, name: str) -> Any:
+    """取当局战绩对象（dataclass / dict）的字段值；缺失返回 None。"""
+    if stats is None:
+        return None
+    if isinstance(stats, dict):
+        return stats.get(name)
+    return getattr(stats, name, None)
+
+
+def _game_names_module() -> Any:
+    """惰性导入 ``src.game_names``（由 coder-names 交付）；缺失返回 None，不抛异常。"""
+    try:
+        from .. import game_names  # type: ignore[attr-defined]
+
+        return game_names
+    except Exception:  # noqa: BLE001 - 模块未交付 / 导入失败时优雅降级
+        try:
+            from src import game_names  # type: ignore[attr-defined]
+
+            return game_names
+        except Exception:  # noqa: BLE001
+            return None
+
+
+def _game_vehicle_name(tank_code: Any) -> Optional[str]:
+    """录像 tank 代码 -> 游戏中文车名；映射模块缺失 / 无结果返回 None。"""
+    if not tank_code:
+        return None
+    module = _game_names_module()
+    if module is None:
+        return None
+    try:
+        return module.vehicle_name(str(tank_code))
+    except Exception:  # noqa: BLE001 - 映射失败不得影响界面
+        return None
+
+
+def vehicle_code(player: Any, stats: Any = None) -> str:
+    """车型原始代码：优先战绩 ``tank_code``，其次玩家录像 tank 字段。"""
+    code = _stat_value(stats, "tank_code")
+    if code:
+        return str(code)
+    tank = getattr(player, "tank", None)
+    return str(tank) if tank else ""
+
+
+def vehicle_display(player: Any, stats: Any = None) -> str:
+    """车型展示名：盒子 tank_title -> src.game_names.vehicle_name(录像 tank) -> 原始值/—。"""
+    title = _stat_value(stats, "tank")
+    if title:
+        return str(title)
+    raw = getattr(player, "tank", None)
+    if not raw:
+        return "—"
+    name = _game_vehicle_name(raw)
+    if name:
+        return str(name)
+    return str(raw)
+
+
+def team_display(team: Any, recorder_team: Any = None) -> str:
+    """阵营展示（绿方 = 录像者本人所在队）：绿方 · 我方 / 红方 · 敌方 / —。"""
+    if team is None:
+        return "—"
+    if recorder_team is None:
+        return "—"
+    try:
+        if int(team) == int(recorder_team):
+            return "绿方 · 我方"
+        return "红方 · 敌方"
+    except (TypeError, ValueError):
+        return "—"
 
 
 def _stats_key(player: models.MatchedPlayer) -> tuple:
@@ -101,16 +227,13 @@ def _stats_key(player: models.MatchedPlayer) -> tuple:
     return ("nick", player.nickname or "")
 
 
-def _hit_rate(player: models.MatchedPlayer, stats_map: dict) -> Optional[float]:
-    """命中率 = 击穿 / 射击（百分比）；无数据返回 None。"""
-    stats = stats_map.get(_stats_key(player))
-    if stats is None:
-        return None
-    shots = getattr(stats, "shots", None)
-    piercings = getattr(stats, "piercings", None)
-    if not shots:
-        return None
-    return float(piercings or 0) * 100.0 / float(shots)
+def match_label(player: models.MatchedPlayer) -> str:
+    """匹配方式展示文案（partial 标注「仅昵称匹配」）。"""
+    if player.match_type == models.MATCH_TYPE_ID:
+        return MATCH_LABEL_ID
+    if player.match_type == models.MATCH_TYPE_NICKNAME:
+        return MATCH_LABEL_PARTIAL if player.partial else MATCH_LABEL_NICKNAME
+    return MATCH_LABEL_NONE
 
 
 def _match_rank(player: models.MatchedPlayer) -> int:
@@ -122,11 +245,42 @@ def _match_rank(player: models.MatchedPlayer) -> int:
     return 2
 
 
+def resolve_recorder_team(detail: Any, players: Optional[list] = None) -> Optional[int]:
+    """反查录像者本人所在队（绿方）。
+
+    优先用 ``ReplayDetail.recorder_dbid`` 精确匹配，其次用 ``recorder_name``
+    匹配昵称；都不行时按 players 中出现的队伍取第一支（仅作兜底，正常录像
+    一定能通过 recorder 信息反查到，不写死 team==1）。
+    """
+    rows = list(players if players is not None else (getattr(detail, "players", None) or []))
+    if detail is None:
+        return None
+    recorder_dbid = getattr(detail, "recorder_dbid", None)
+    recorder_name = getattr(detail, "recorder_name", None)
+    if recorder_dbid is not None:
+        for player in rows:
+            dbid = getattr(player, "dbid", None)
+            if dbid is not None and int(dbid) == int(recorder_dbid):
+                team = getattr(player, "team", None)
+                if team is not None:
+                    return int(team)
+    if recorder_name:
+        for player in rows:
+            if getattr(player, "nickname", None) == recorder_name:
+                team = getattr(player, "team", None)
+                if team is not None:
+                    return int(team)
+    teams = sorted({
+        int(getattr(player, "team")) for player in rows
+        if getattr(player, "team", None) is not None
+    })
+    return teams[0] if teams else None
+
+
+# ---------------------------------------------------------------- 排序工具
 def _sort_value(player: models.MatchedPlayer, column: int, stats_map: dict) -> Any:
     """取某列的排序原始值；无值返回 None（排序时排最后）。"""
     key = COLUMNS[column]["key"]
-    if key == "team":
-        return player.team
     if key == "nickname":
         return (player.nickname or "").lower()
     if key == "dbid":
@@ -143,83 +297,78 @@ def _sort_value(player: models.MatchedPlayer, column: int, stats_map: dict) -> A
         return (player.records[0].duration or "") if player.records else None
     if key == "match_type":
         return _match_rank(player)
+    if key == "vehicle":
+        stats = stats_map.get(_stats_key(player))
+        return vehicle_display(player, stats).lower()
     stats = stats_map.get(_stats_key(player))
-    if stats is None:
-        return None
     if key == "combat":
-        return stats.combat
-    if key == "damage":
-        return stats.damage
-    if key == "kills":
-        return stats.kills
-    if key == "xp":
-        return stats.xp
-    if key == "hit_rate":
-        return _hit_rate(player, stats_map)
+        return _stat_value(stats, "combat")
+    if key in _STATS_FIELD_KEYS:
+        return _stat_value(stats, key)
     return None
 
 
-def _compare_players(first: models.MatchedPlayer, second: models.MatchedPlayer,
-                     column: int = COLUMN_INDEX["ban_count"], ascending: bool = False,
-                     stats_map: Optional[dict] = None) -> int:
-    """比较两名玩家：主排序键 + 封禁次数降序 + ID 确认置前 + 最近日期降序。"""
-    stats_map = stats_map or {}
-    value_a = _sort_value(first, column, stats_map)
-    value_b = _sort_value(second, column, stats_map)
-    if value_a is None and value_b is not None:
+def _compare_values(value_a: Any, value_b: Any, ascending: bool) -> int:
+    """比较两个排序值：None 一律置后；其余按升降序比较。"""
+    if value_a is None and value_b is None:
+        return 0
+    if value_a is None:
         return 1
-    if value_a is not None and value_b is None:
+    if value_b is None:
         return -1
-    if value_a is not None and value_b is not None:
+    try:
         comparison = (value_a > value_b) - (value_a < value_b)
+    except TypeError:  # 混合类型（理论上不会出现）按字符串比较
+        text_a, text_b = str(value_a), str(value_b)
+        comparison = (text_a > text_b) - (text_a < text_b)
+    if comparison == 0:
+        return 0
+    return comparison if ascending else -comparison
+
+
+def compare_players(first: models.MatchedPlayer, second: models.MatchedPlayer,
+                    chain: Any = DEFAULT_SORT_CHAIN,
+                    stats_map: Optional[dict] = None) -> int:
+    """按排序链比较两名玩家（组内排序用），最后以昵称升序做稳定兜底。"""
+    stats_map = stats_map or {}
+    for column_key, ascending in chain:
+        column = COLUMN_INDEX[column_key]
+        comparison = _compare_values(
+            _sort_value(first, column, stats_map),
+            _sort_value(second, column, stats_map),
+            bool(ascending),
+        )
         if comparison:
-            return comparison if ascending else -comparison
-    count_a = int(first.ban_count or 0)
-    count_b = int(second.ban_count or 0)
-    if count_a != count_b:
-        return -1 if count_a > count_b else 1
-    rank_a = _match_rank(first)
-    rank_b = _match_rank(second)
-    if rank_a != rank_b:
-        return -1 if rank_a < rank_b else 1
-    day_a = first.latest_ban_day or ""
-    day_b = second.latest_ban_day or ""
-    if day_a != day_b:
-        return -1 if day_a > day_b else 1
-    name_a = first.nickname or ""
-    name_b = second.nickname or ""
+            return comparison
+    name_a = (first.nickname or "").lower()
+    name_b = (second.nickname or "").lower()
     return (name_a > name_b) - (name_a < name_b)
 
 
-def match_label(player: models.MatchedPlayer) -> str:
-    """匹配方式展示文案（partial 标注「仅昵称匹配」）。"""
-    if player.match_type == models.MATCH_TYPE_ID:
-        return MATCH_LABEL_ID
-    if player.match_type == models.MATCH_TYPE_NICKNAME:
-        return MATCH_LABEL_PARTIAL if player.partial else MATCH_LABEL_NICKNAME
-    return MATCH_LABEL_NONE
-
-
 class PlayerTableModel(QAbstractTableModel):
-    """结果表模型（行 = 单局参战玩家）。"""
+    """结果表模型（行 = 组头行 / 单局参战玩家行）。
+
+    组头行由 ``GROUP_GREEN`` / ``GROUP_RED`` 标记，``row_object()`` 返回 None；
+    视图通过 ``is_group_row()`` 判定后做跨列合并（见 main_window）。
+    """
 
     def __init__(self, parent: Any = None) -> None:
         super().__init__(parent)
         self._all_rows: list = []
-        self._rows: list = []
+        self._entries: list = []
         self._stats_state = STATS_STATE_IDLE
         self._stats_map: dict = {}
         self._stats_message = ""
         self._filters = {"id_only": False, "hits_only": False, "level": "all"}
-        self._sort_column = COLUMN_INDEX["ban_count"]
-        self._sort_order = Qt.SortOrder.DescendingOrder if Qt is not None else 1
+        self._sort_chain = tuple(DEFAULT_SORT_CHAIN)
         self._user_sorted = False
+        self._recorder_team: Optional[int] = None
 
     # ------------------------------------------------------------ Qt 接口
     def rowCount(self, parent: Any = None) -> int:  # noqa: N802 - Qt 命名
         if parent is not None and getattr(parent, "isValid", lambda: False)():
             return 0
-        return len(self._rows)
+        return len(self._entries)
 
     def columnCount(self, parent: Any = None) -> int:  # noqa: N802 - Qt 命名
         if parent is not None and getattr(parent, "isValid", lambda: False)():
@@ -240,10 +389,9 @@ class PlayerTableModel(QAbstractTableModel):
             return None
         row = index.row()
         column = index.column()
-        if not (0 <= row < len(self._rows) and 0 <= column < len(COLUMNS)):
+        if not (0 <= row < len(self._entries) and 0 <= column < len(COLUMNS)):
             return None
-        player = self._rows[row]
-        key = COLUMNS[column]["key"]
+        entry = self._entries[row]
         display_role = Qt.ItemDataRole.DisplayRole if Qt is not None else 0
         tooltip_role = Qt.ItemDataRole.ToolTipRole if Qt is not None else 3
         background_role = Qt.ItemDataRole.BackgroundRole if Qt is not None else 9
@@ -251,6 +399,12 @@ class PlayerTableModel(QAbstractTableModel):
         font_role = Qt.ItemDataRole.FontRole if Qt is not None else 11
         alignment_role = Qt.ItemDataRole.TextAlignmentRole if Qt is not None else 7
 
+        if entry[0] == "group":
+            return self._group_data(entry, column, role,
+                                    display_role, background_role, foreground_role,
+                                    font_role, alignment_role)
+        player = entry[1]
+        key = COLUMNS[column]["key"]
         if role == display_role:
             return self._display_value(player, key)
         if role == tooltip_role:
@@ -265,29 +419,72 @@ class PlayerTableModel(QAbstractTableModel):
             return self._alignment(column)
         return None
 
+    def _group_data(self, entry: tuple, column: int, role: int,
+                    display_role: int, background_role: int, foreground_role: int,
+                    font_role: int, alignment_role: int) -> Any:
+        """组头行：第 0 列显示组名（视图跨列合并），整行浅底 + 加粗。"""
+        kind = entry[1]
+        if role == display_role:
+            return entry[2] if column == 0 else ""
+        if role == background_role:
+            if QColor is None:
+                return None
+            return QColor("#e8f7ee") if kind == GROUP_GREEN else QColor("#fdecec")
+        if role == foreground_role:
+            if QColor is None:
+                return None
+            return QColor("#166534") if kind == GROUP_GREEN else QColor("#991b1b")
+        if role == font_role:
+            if QFont is None:
+                return None
+            font = QFont()
+            font.setBold(True)
+            return font
+        if role == alignment_role:
+            if Qt is None:
+                return None
+            return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        return None
+
     def flags(self, index: Any) -> Any:
         if Qt is None:
             return 0
+        if not getattr(index, "isValid", lambda: False)():
+            return Qt.ItemFlag.NoItemFlags
+        row = index.row()
+        if 0 <= row < len(self._entries) and self._entries[row][0] == "group":
+            # 组头行：可显示但不可选中（不参与排序 / 明细联动）。
+            return Qt.ItemFlag.ItemIsEnabled
         return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
 
     # ------------------------------------------------------------ 数据填充
-    def set_rows(self, rows: list) -> None:
-        """替换全部行；默认按 A4 口径排序（次数降序 + 同次数日期降序）。"""
+    def set_rows(self, rows: list, replay: Any = None,
+                 recorder_team: Optional[int] = None) -> None:
+        """替换全部玩家行；``replay`` 用于反查录像者所在队并做红绿分组。"""
         self._all_rows = list(rows or [])
         self._user_sorted = False
-        self._sort_column = COLUMN_INDEX["ban_count"]
-        self._sort_order = Qt.SortOrder.DescendingOrder if Qt is not None else 1
+        self._sort_chain = tuple(DEFAULT_SORT_CHAIN)
+        if recorder_team is not None:
+            self._recorder_team = int(recorder_team)
+        else:
+            self._recorder_team = resolve_recorder_team(replay, self._all_rows)
         self._rebuild()
 
     def set_stats(self, state: str, stats_map: Optional[dict] = None, message: str = "") -> None:
-        """设置当局战绩状态（idle / loading / ready / unavailable）与数据。"""
+        """设置当局战绩状态（idle / loading / ready / unavailable）与数据。
+
+        战绩异步到达后：默认排序的次级键（本局战力 / 伤害）才可用，因此未手动
+        排序时重建一次让默认排序生效；手动排序时仅刷新显示值。
+        """
         self._stats_state = state
         self._stats_map = dict(stats_map or {})
         self._stats_message = message
-        if self._rows:
-            top = self.index(0, 0)
-            bottom = self.index(len(self._rows) - 1, len(COLUMNS) - 1)
-            self.dataChanged.emit(top, bottom)
+        if not self._entries:
+            return
+        if not self._user_sorted:
+            self._rebuild()
+            return
+        self._emit_data_changed()
 
     def stats_message(self) -> str:
         return self._stats_message
@@ -298,34 +495,90 @@ class PlayerTableModel(QAbstractTableModel):
         self._rebuild()
 
     def sort(self, column: int, order: Any = None) -> None:  # noqa: N802 - Qt 命名
-        """表头点击排序；同键按次数降序 + ID 确认置前 + 最近日期降序。"""
+        """表头点击排序：只在组内改排序，组头 / 组顺序不动。"""
         if not (0 <= column < len(COLUMNS)):
             return
-        self._sort_column = column
-        if order is None:
-            order = Qt.SortOrder.AscendingOrder if Qt is not None else 0
-        self._sort_order = order
+        ascending = order == (Qt.SortOrder.AscendingOrder if Qt is not None else 0)
+        self._sort_chain = ((COLUMNS[column]["key"], bool(ascending)),)
         self._user_sorted = True
         self._rebuild()
 
     def reset_sort(self) -> None:
-        """恢复默认排序（次数降序）。"""
-        self._sort_column = COLUMN_INDEX["ban_count"]
-        self._sort_order = Qt.SortOrder.DescendingOrder if Qt is not None else 1
+        """恢复默认排序（封禁次数降序 -> 本局战力降序 -> 伤害降序）。"""
+        self._sort_chain = tuple(DEFAULT_SORT_CHAIN)
         self._user_sorted = False
         self._rebuild()
 
     # ------------------------------------------------------------ 查询接口
-    def row_object(self, row: int) -> Optional[models.MatchedPlayer]:
-        """取模型行对应的玩家对象。"""
-        if 0 <= row < len(self._rows):
-            return self._rows[row]
+    def recorder_team(self) -> Optional[int]:
+        """录像者本人所在队（绿方）；无法识别时返回 None。"""
+        return self._recorder_team
+
+    def is_group_row(self, row: int) -> bool:
+        """该模型行是否为组头行。"""
+        return 0 <= row < len(self._entries) and self._entries[row][0] == "group"
+
+    def group_kind(self, row: int) -> Optional[str]:
+        """组头行类型（GROUP_GREEN / GROUP_RED）；非组头返回 None。"""
+        if self.is_group_row(row):
+            return self._entries[row][1]
         return None
 
+    def group_label(self, row: int) -> str:
+        """组头行完整文案（含人数）；非组头返回空串。"""
+        if self.is_group_row(row):
+            return self._entries[row][2]
+        return ""
+
+    def row_object(self, row: int) -> Optional[models.MatchedPlayer]:
+        """取模型行对应的玩家对象（组头行返回 None）。"""
+        if 0 <= row < len(self._entries) and self._entries[row][0] == "player":
+            return self._entries[row][1]
+        return None
+
+    def player_row_count(self) -> int:
+        """当前可见的玩家行数（不含组头行）。"""
+        return sum(1 for entry in self._entries if entry[0] == "player")
+
+    def total_player_count(self) -> int:
+        """全部玩家数（不受筛选影响）。"""
+        return len(self._all_rows)
+
+    def first_player_row(self) -> int:
+        """第一行玩家行的模型行号；没有玩家返回 -1。"""
+        for row, entry in enumerate(self._entries):
+            if entry[0] == "player":
+                return row
+        return -1
+
+    def player_rows(self) -> list:
+        """按当前显示顺序返回玩家行号列表（不含组头行）。"""
+        return [row for row, entry in enumerate(self._entries) if entry[0] == "player"]
+
+    def row_for_player(self, player: Any) -> int:
+        """定位某玩家对象在当前可见行中的模型行号；不可见返回 -1。"""
+        if player is None:
+            return -1
+        for row, entry in enumerate(self._entries):
+            if entry[0] != "player":
+                continue
+            candidate = entry[1]
+            if candidate is player:
+                return row
+            if (getattr(candidate, "dbid", None) is not None
+                    and getattr(candidate, "dbid", None) == getattr(player, "dbid", None)):
+                return row
+            if (getattr(candidate, "nickname", None) == getattr(player, "nickname", None)
+                    and getattr(candidate, "team", None) == getattr(player, "team", None)):
+                return row
+        return -1
+
     def visible_rows(self) -> list:
-        return list(self._rows)
+        """当前可见玩家对象列表（按显示顺序，不含组头行）。"""
+        return [entry[1] for entry in self._entries if entry[0] == "player"]
 
     def total_rows(self) -> list:
+        """全部玩家对象列表（不受筛选影响）。"""
         return list(self._all_rows)
 
     def stats_for(self, player: models.MatchedPlayer) -> Any:
@@ -341,31 +594,58 @@ class PlayerTableModel(QAbstractTableModel):
 
     # ------------------------------------------------------------ 内部实现
     def _rebuild(self) -> None:
-        """按筛选条件与排序规则重建可见行。"""
+        """按筛选条件、红绿分组与组内排序规则重建可见行。"""
         self.beginResetModel()
-        rows = list(self._all_rows)
+        players = list(self._all_rows)
         filters = self._filters
         if filters["id_only"]:
-            rows = [item for item in rows if item.match_type == models.MATCH_TYPE_ID]
+            players = [item for item in players if item.match_type == models.MATCH_TYPE_ID]
         if filters["hits_only"]:
-            rows = [item for item in rows if item.is_hit]
+            players = [item for item in players if item.is_hit]
         if filters["level"] == "red":
-            rows = [item for item in rows if item.level == models.LEVEL_RED]
+            players = [item for item in players if item.level == models.LEVEL_RED]
         elif filters["level"] == "yellow":
-            rows = [item for item in rows if item.level == models.LEVEL_YELLOW]
-        comparator = partial(
-            _compare_players,
-            column=self._sort_column,
-            ascending=self._sort_order == (Qt.SortOrder.AscendingOrder if Qt is not None else 0),
-            stats_map=self._stats_map,
+            players = [item for item in players if item.level == models.LEVEL_YELLOW]
+
+        comparator = cmp_to_key(
+            lambda first, second: compare_players(
+                first, second, chain=self._sort_chain, stats_map=self._stats_map
+            )
         )
-        rows.sort(key=cmp_to_key(comparator))
-        self._rows = rows
+        entries = []
+        for kind, group_players in self._split_groups(players):
+            if not group_players:
+                continue
+            group_players.sort(key=comparator)
+            entries.append(("group", kind, "%s（%d 人）" % (GROUP_LABELS[kind], len(group_players))))
+            entries.extend(("player", player) for player in group_players)
+        self._entries = entries
         self.endResetModel()
 
+    def _split_groups(self, players: list) -> list:
+        """按绿方（录像者队）在上、红方在下拆分玩家；无队伍信息时全部归绿方。"""
+        green_team = self._recorder_team
+        green: list = []
+        red: list = []
+        for player in players:
+            team = getattr(player, "team", None)
+            if green_team is None or team is None:
+                green.append(player)
+            elif int(team) == int(green_team):
+                green.append(player)
+            else:
+                red.append(player)
+        return [(GROUP_GREEN, green), (GROUP_RED, red)]
+
+    def _emit_data_changed(self) -> None:
+        """整表刷新显示值（不重建行结构）。"""
+        if not self._entries:
+            return
+        top = self.index(0, 0)
+        bottom = self.index(len(self._entries) - 1, len(COLUMNS) - 1)
+        self.dataChanged.emit(top, bottom)
+
     def _display_value(self, player: models.MatchedPlayer, key: str) -> str:
-        if key == "team":
-            return "绿方" if player.team == 1 else ("红方" if player.team == 2 else "—")
         if key == "nickname":
             return player.nickname or "—"
         if key == "dbid":
@@ -383,26 +663,30 @@ class PlayerTableModel(QAbstractTableModel):
         if key == "match_type":
             return match_label(player)
         stats = self._stats_map.get(_stats_key(player))
+        if key == "vehicle":
+            # 车型：盒子 tank_title 优先；盒子不可用时用 game_names 把录像 tank
+            # 代码翻成中文车名；映射模块缺失时显示原始值（优雅降级）。
+            return vehicle_display(player, stats)
         if self._stats_state == STATS_STATE_LOADING and stats is None:
             return "…"
         if stats is None:
             return "—"
         if key == "combat":
-            return _format_combat(stats.combat)
-        if key == "damage":
-            return _format_number(stats.damage)
-        if key == "kills":
-            return _format_number(stats.kills)
-        if key == "xp":
-            return _format_number(stats.xp)
-        if key == "hit_rate":
-            rate = _hit_rate(player, self._stats_map)
-            return "%.1f%%" % rate if rate is not None else "—"
+            return format_combat_int(_stat_value(stats, "combat"))
+        if key in _STATS_FIELD_KEYS:
+            return _format_number(_stat_value(stats, key))
         return "—"
 
     def _tooltip(self, player: models.MatchedPlayer, key: str) -> str:
         if key == "match_type":
             return TOOLTIPS.get(match_label(player), "")
+        if key == "vehicle":
+            stats = self._stats_map.get(_stats_key(player))
+            code = vehicle_code(player, stats)
+            name = vehicle_display(player, stats)
+            if code and code != name:
+                return "车型：%s（代码 %s）" % (name, code)
+            return "车型：%s" % name
         if key in STATS_KEYS:
             if self._stats_state == STATS_STATE_LOADING:
                 return "正在加载当局战绩…"
@@ -413,8 +697,16 @@ class PlayerTableModel(QAbstractTableModel):
             return "账号 ID（完整录像 dbid）；partial 录像无账号 ID"
         if key == "ban_count":
             return "1 次 = 黄标，2 次及以上 = 红标；同一玩家跨批次记录已归集"
+        if key == "reason":
+            return ((player.records[0].reason or "") if player.records else "") or "未命中封禁名单"
+        if key == "duration":
+            return ((player.records[0].duration or "") if player.records else "") or "未命中封禁名单"
+        if key == "latest_ban_day":
+            return (player.latest_ban_day or "") or "未命中封禁名单"
         if key == "nickname":
-            return "昵称匹配口径：同昵称视为同一人（A2）"
+            return "%s（昵称匹配口径：同昵称视为同一人，A2）" % (player.nickname or "—")
+        if key == "clan_abbrev":
+            return "军团缩写：%s" % (player.clan_abbrev or "—")
         return ""
 
     def _background(self, player: models.MatchedPlayer) -> Any:
@@ -454,31 +746,36 @@ class PlayerTableModel(QAbstractTableModel):
 
 
 def main(argv: list) -> int:
-    """自检：不创建 QApplication，直接验证排序 / 筛选 / 展示文案。"""
+    """自检：不创建 QApplication，直接验证列契约 / 分组 / 排序 / 展示文案。"""
     import time
 
     start = time.time()
     base_path = "."
-    print("[1/3] 结果表模型自检（base_path=%r）列数=%d" % (base_path, len(COLUMNS)))
+    print("[1/4] 结果表模型自检（base_path=%r）列数=%d" % (base_path, len(COLUMNS)))
+    print("      列标题=%s" % "、".join(column["title"] for column in COLUMNS))
     from src.app import mock_data
 
     detail = mock_data.build_detail(mock_data.build_replays()[0])
     matches = mock_data.build_matches(detail)
     model = PlayerTableModel()
-    model.set_rows(matches)
-    print("      总行=%d 命中=%d 首行=%s（次数=%d）"
-          % (len(model.total_rows()), len([x for x in matches if x.is_hit]),
-             model.row_object(0).nickname, model.row_object(0).ban_count))
-    model.apply_filters(id_only=True)
-    print("[2/3] 仅看 ID 命中：%d 行，全部 ID 匹配=%s"
-          % (model.rowCount(), all(x.match_type == models.MATCH_TYPE_ID for x in model.visible_rows())))
+    model.set_rows(matches, detail)
+    print("      玩家=%d 模型行=%d 绿方=%s 组头=%s"
+          % (model.total_player_count(), model.rowCount(), model.recorder_team(),
+             [model.group_label(row) for row in range(model.rowCount()) if model.is_group_row(row)]))
+    first = model.row_object(model.first_player_row())
+    print("[2/4] 默认排序首行=%s（次数=%d）" % (first.nickname, first.ban_count))
     stats = mock_data.build_battle_stats(detail)
     stats_map = {("id", item.dbid): item for item in stats.players}
-    model.apply_filters()
     model.set_stats(STATS_STATE_READY, stats_map)
-    print("[3/3] 当局战绩列：首行战力=%s 命中率=%s；耗时 %.2f 秒"
-          % (model.data(model.index(0, COLUMN_INDEX["combat"]), Qt.ItemDataRole.DisplayRole if Qt else 0),
-             model.data(model.index(0, COLUMN_INDEX["hit_rate"]), Qt.ItemDataRole.DisplayRole if Qt else 0),
+    combat_column = COLUMN_INDEX["combat"]
+    print("[3/4] 本局战力取整示例：%s（原值 %s）"
+          % (model.data(model.index(model.first_player_row(), combat_column),
+                        Qt.ItemDataRole.DisplayRole if Qt else 0),
+             getattr(stats.players[0], "combat", None)))
+    model.apply_filters(id_only=True)
+    print("[4/4] 仅看 ID 命中：玩家 %d 行 / 模型 %d 行，全部 ID 匹配=%s；耗时 %.2f 秒"
+          % (model.player_row_count(), model.rowCount(),
+             all(item.match_type == models.MATCH_TYPE_ID for item in model.visible_rows()),
              time.time() - start))
     print("[done] table_model self-check passed")
     return 0

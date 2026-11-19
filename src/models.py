@@ -42,6 +42,22 @@ STATS_STATUS_EMPTY = "empty"
 STATS_STATUS_EXPIRED = "expired"
 STATS_STATUS_UNAVAILABLE = "unavailable"
 
+# 对局胜负平（BattleStats.outcome）：win=胜 / draw=平 / loss=负；空串=未知。
+OUTCOME_WIN = "win"
+OUTCOME_DRAW = "draw"
+OUTCOME_LOSS = "loss"
+OUTCOME_LABELS = {
+    OUTCOME_WIN: "胜利",
+    OUTCOME_DRAW: "平局",
+    OUTCOME_LOSS: "失败",
+}
+
+# 对局 arena_id 来源（BattleStats.arena_source）：
+# - replay_results：完整录像 results 块自带的 arena_unique_id；
+# - box_battlelog：partial 录像经盒子战斗日志按「时间 + 坦克」反查得到。
+ARENA_SOURCE_REPLAY = "replay_results"
+ARENA_SOURCE_BOX_BATTLELOG = "box_battlelog"
+
 
 @dataclass
 class ReplayPlayer:
@@ -160,12 +176,18 @@ class MatchedPlayer:
 
 @dataclass
 class BattlePlayerStats:
-    """当局战绩中一名玩家的数据（battledetail 的 team_a/team_b 明细）。"""
+    """当局战绩中一名玩家的数据（battledetail 的 team_a/team_b 明细）。
+
+    字段契约（盒子 battledetail 口径，后续界面按此消费、不得改名）：
+    ``tank`` 为游戏车名（``tank_title``）；``tank_code`` 为坦克 slug
+    （``vehicle_icon``，如 ``japan-j20_type_2605``）；其余新字段均为盒子同款明细。
+    """
 
     dbid: Optional[int] = None
     nickname: Optional[str] = None
     team: Optional[int] = None
-    tank: Optional[str] = None
+    tank: Optional[str] = None              # 游戏车名（盒子 tank_title）
+    tank_code: Optional[str] = None         # 坦克 slug（盒子 vehicle_icon）
     combat: Optional[float] = None          # 单局战力（盒子口径，不是伤害）
     damage: Optional[int] = None
     kills: Optional[int] = None
@@ -174,11 +196,24 @@ class BattlePlayerStats:
     piercings: Optional[int] = None
     spotted: Optional[int] = None
     capture_points: Optional[int] = None
+    # ---- 盒子同款明细（界面新增列的数据源；缺失显示「—」）----
+    hits_received: Optional[int] = None     # directHitsReceived 被击中次数
+    potential_damage: Optional[int] = None  # potentialDamageReceived 受到的潜在伤害
+    damage_blocked: Optional[int] = None    # damageBlockedByArmor 装甲抵消伤害
+    vehicles_damaged: Optional[int] = None  # damaged 击伤敌方战车数
+    assisted_damage: Optional[int] = None   # damageAssistedRadio + damageAssistedTrack
+    defense_points: Optional[int] = None    # numDefended 保卫基地防御点数
+    mileage: Optional[int] = None           # mileage 行驶里程
 
 
 @dataclass
 class BattleStats:
-    """一场对局的当局战绩（按 arena_id 缓存，同一局重复查看零请求）。"""
+    """一场对局的当局战绩（按 arena_id 缓存，同一局重复查看零请求）。
+
+    ``outcome/outcome_label``：胜负平（win/draw/loss + 胜利/平局/失败）；
+    ``score``：比分文案（如 ``14v6``，盒子 team_a_kills v team_b_kills）；
+    ``arena_source``：arena_id 来源（``replay_results`` / ``box_battlelog``）。
+    """
 
     arena_id: str
     replay_id: Optional[int] = None
@@ -187,6 +222,10 @@ class BattleStats:
     status: str = STATS_STATUS_OK
     players: list = field(default_factory=list)
     raw_json: Optional[str] = None
+    outcome: Optional[str] = None
+    outcome_label: str = ""
+    score: str = ""
+    arena_source: str = ""
 
 
 @dataclass

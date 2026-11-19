@@ -203,11 +203,20 @@ class ReplayQueryResult:
 
 @dataclass
 class BattleStatsResult:
-    """当局战绩结果（含可用性与中文提示）。"""
+    """当局战绩结果（含可用性、胜负平/比分与中文提示）。
+
+    - ``outcome_label``：胜负平文案（胜利/平局/失败；完整录像即便盒子不可用也用
+      replay ``winner_team`` + 录像者队伍给出；partial 局用 battleLog ``arena-win``）；
+    - ``score``：比分文案（如 ``14v6``，盒子 ``team_a_kills v team_b_kills``）；
+    - ``cached``：本次是否直接命中本地缓存（True = 未发起任何盒子请求）。
+    """
 
     stats: Any = None
     available: bool = False
     message: str = ""
+    outcome_label: str = ""
+    score: str = ""
+    cached: bool = False
 
 
 @dataclass
@@ -326,12 +335,104 @@ def _as_float(value: Any) -> Optional[float]:
         return None
 
 
-def _as_replay_info(item: Any) -> models.ReplayInfo:
-    """把扫描器返回的 ReplayDetail / dict / 对象归一为 ReplayInfo。"""
+# ---------------------------------------------------------------- 胜负平 / 地图名
+def recorder_team(detail: Any) -> Optional[int]:
+    """从 ``ReplayDetail.players`` 反查录像者所在队（按 dbid 优先、昵称兜底）。
+
+    不能写死 ``team == 1``：国服录像的阵营 1/2 与盒子 team_a/team_b 不保证对应。
+    partial 录像没有 dbid，但名册里有昵称/阵营，同样适用。
+    """
+    players = getattr(detail, "players", None) or []
+    recorder_dbid = getattr(detail, "recorder_dbid", None)
+    if recorder_dbid is not None:
+        for player in players:
+            if getattr(player, "dbid", None) == recorder_dbid:
+                return getattr(player, "team", None)
+    recorder_name = str(getattr(detail, "recorder_name", None) or "").strip().lower()
+    if recorder_name:
+        for player in players:
+            nickname = str(getattr(player, "nickname", None) or "").strip().lower()
+            if nickname and nickname == recorder_name:
+                return getattr(player, "team", None)
+    return None
+
+
+def replay_outcome(detail: Any) -> tuple:
+    """完整录像的胜负平：``(outcome, outcome_label)``；无法判定返回 ``(None, "")``。
+
+    ``winner_team == 0`` → 平局；等于录像者所在队 → 胜利；否则失败。
+    partial 录像没有结算块（``winner_team`` 为空），返回 ``(None, "")``。
+    """
+    winner_team = getattr(detail, "winner_team", None)
+    if winner_team is None:
+        return None, ""
+    try:
+        winner = int(winner_team)
+    except (TypeError, ValueError):
+        return None, ""
+    if winner == 0:
+        return models.OUTCOME_DRAW, models.OUTCOME_LABELS[models.OUTCOME_DRAW]
+    team = recorder_team(detail)
+    if team is None:
+        return None, ""
+    outcome = models.OUTCOME_WIN if int(team) == winner else models.OUTCOME_LOSS
+    return outcome, models.OUTCOME_LABELS[outcome]
+
+
+def _game_names_module() -> Any:
+    """惰性导入 ``src.game_names``（coder-names 交付；缺失时返回 None，绝不抛异常）。"""
+    try:
+        return importlib.import_module("src.game_names")
+    except Exception:  # noqa: BLE001 - 车名/地图名映射属可选增强，缺失只降级
+        return None
+
+
+def map_display_name(code: Any, game_dir: Any = None) -> str:
+    """地图代码（如 ``99_poland``）→ 游戏中文名；映射模块不可用时返回空串。"""
+    if not code:
+        return ""
+    module = _game_names_module()
+    func = getattr(module, "map_name", None) if module is not None else None
+    if not callable(func):
+        return ""
+    try:
+        display = _call_adaptive(func, map_code=code, code=code, game_dir=game_dir)
+    except Exception:  # noqa: BLE001 - 映射失败只降级为原代码
+        return ""
+    return str(display) if display else ""
+
+
+def _apply_map_display(info: models.ReplayInfo, game_dir: Any = None) -> models.ReplayInfo:
+    """ReplayInfo.map_name 若仍是代码，用 ``game_names.map_name`` 换成中文名。"""
+    code = getattr(info, "map_name", None)
+    if not code:
+        return info
+    display = map_display_name(code, game_dir)
+    if display:
+        info.map_name = display
+    return info
+
+
+def battle_score_from_payload(raw: Any) -> str:
+    """从 battledetail 原始 payload 取比分文案（``team_a_kills v team_b_kills``）。"""
+    if not isinstance(raw, dict):
+        return ""
+    result = raw.get("result") if isinstance(raw.get("result"), dict) else raw
+    if not isinstance(result, dict):
+        return ""
+    team_a = _as_int(result.get("team_a_kills"), -1)
+    team_b = _as_int(result.get("team_b_kills"), -1)
+    if team_a < 0 or team_b < 0:
+        return ""
+    return "%dv%d" % (team_a, team_b)
+
+
+def _as_replay_info(item: Any, game_dir: Any = None) -> models.ReplayInfo:
+    """把扫描器返回的 ReplayDetail / dict / 对象归一为 ReplayInfo（地图代码换中文名）。"""
     if isinstance(item, models.ReplayInfo):
-        return item
+        return _apply_map_display(item, game_dir)
     if isinstance(item, models.ReplayDetail) or hasattr(item, "file_path"):
-        return models.ReplayInfo(
+        info = models.ReplayInfo(
             path=str(getattr(item, "file_path", "") or ""),
             size=int(getattr(item, "file_size", 0) or 0),
             mtime=float(getattr(item, "mtime", 0.0) or 0.0),
@@ -342,13 +443,14 @@ def _as_replay_info(item: Any) -> models.ReplayInfo:
             parse_status=getattr(item, "parse_status", models.PARSE_STATUS_OK),
             player_count=int(getattr(item, "player_count", 0) or 0),
         )
+        return _apply_map_display(info, game_dir)
     if isinstance(item, dict):
         known = {name for name in models.ReplayInfo.__dataclass_fields__}
         payload = {key: value for key, value in item.items() if key in known}
         payload.setdefault("path", item.get("file_path") or item.get("filename") or "")
         if not isinstance(payload.get("path"), str):
             payload["path"] = str(payload.get("path") or "")
-        return models.ReplayInfo(**payload)
+        return _apply_map_display(models.ReplayInfo(**payload), game_dir)
     return item
 
 
@@ -984,7 +1086,7 @@ class AppService:
         raw = self._scan_real(scan_mode, window_days, manual_path, progress_cb, cancel_cb)
         if hasattr(raw, "replays"):
             raw = getattr(raw, "replays")
-        replays = [_as_replay_info(item) for item in raw or []]
+        replays = [_as_replay_info(item, getattr(self.cfg, "game_dir", None)) for item in raw or []]
         replays = [item for item in replays if getattr(item, "path", None)]
         if progress_cb is not None:
             progress_cb(100, "扫描完成：%d 个录像" % len(replays))
@@ -1083,8 +1185,8 @@ class AppService:
                 raise ServiceError("录像扫描器无法初始化：%s" % exc) from exc
 
     def _replay_info_from_detail(self, detail: models.ReplayDetail) -> models.ReplayInfo:
-        """由已解析的详情反推索引行（手动选择单个录像时用）。"""
-        return models.ReplayInfo(
+        """由已解析的详情反推索引行（手动选择单个录像时用；地图代码换中文名）。"""
+        info = models.ReplayInfo(
             path=detail.file_path,
             size=detail.file_size,
             mtime=detail.mtime,
@@ -1095,6 +1197,7 @@ class AppService:
             parse_status=detail.parse_status,
             player_count=detail.player_count,
         )
+        return _apply_map_display(info, getattr(self.cfg, "game_dir", None))
 
     # ------------------------------------------------------------ 单局查询
     def query_replay(self, replay: Any) -> ReplayQueryResult:
@@ -1165,28 +1268,109 @@ class AppService:
 
     # ------------------------------------------------------------ 当局战绩
     def get_battle_stats(self, detail: models.ReplayDetail) -> BattleStatsResult:
-        """取当局战绩（A7：打开某局才请求；180 天外 / partial 不发请求）。"""
+        """取当局战绩（A7：打开某局才请求；180 天外不发请求）。
+
+        - **完整录像**：按 replay ``arena_unique_id`` 请求 battledetail；盒子不可用时
+          仍用 replay 结果（winner_team + 录像者队伍）给出 ``outcome_label``；
+        - **partial 录像**：走盒子 battleLog 反查 arena_id（时间 + 坦克匹配）后再请求
+          battledetail，胜负平取 battleLog ``arena-win``；映射成功后二次打开零网络。
+        """
         if detail is None:
             return BattleStatsResult(available=False, message="没有可查询的对局")
+        outcome, outcome_label = replay_outcome(detail)
         if getattr(detail, "is_partial", False):
-            return BattleStatsResult(
-                available=False,
-                message="partial 录像没有 arena_unique_id，无法取当局战绩（仅完整录像可查）",
-            )
+            if not self._within_battle_stats_window(detail):
+                return BattleStatsResult(
+                    available=False,
+                    message="该局超出战绩接口 %d 天范围（仅最近 %d 天对局可查），已跳过请求"
+                    % (BATTLE_STATS_WINDOW_DAYS, BATTLE_STATS_WINDOW_DAYS),
+                )
+            if self._mock:
+                return BattleStatsResult(
+                    available=False,
+                    message="演示模式（mock）：partial 局未接入盒子战斗日志反查",
+                )
+            return self._battle_stats_partial(detail)
         if not self._within_battle_stats_window(detail):
             return BattleStatsResult(
                 available=False,
                 message="该局超出战绩接口 %d 天范围（仅最近 %d 天对局可查），已跳过请求"
                 % (BATTLE_STATS_WINDOW_DAYS, BATTLE_STATS_WINDOW_DAYS),
+                outcome_label=outcome_label,
             )
         if self._mock:
             stats = mock_data.build_battle_stats(detail)
+            stats.outcome = outcome
+            stats.outcome_label = outcome_label
+            stats.arena_source = models.ARENA_SOURCE_REPLAY
             return BattleStatsResult(
                 stats=stats,
                 available=True,
                 message="数据来自偶游盒子（演示数据），仅供参考、非官方数据",
+                outcome_label=outcome_label,
+                score=stats.score or "",
             )
-        return self._battle_stats_real(detail)
+        result = self._battle_stats_real(detail)
+        if outcome_label:
+            result.outcome_label = outcome_label
+            if result.stats is not None:
+                result.stats.outcome = outcome
+                result.stats.outcome_label = outcome_label
+        if result.stats is not None:
+            result.stats.arena_source = models.ARENA_SOURCE_REPLAY
+            if not result.score:
+                result.score = getattr(result.stats, "score", "") or ""
+        return result
+
+    def _battle_stats_partial(self, detail: models.ReplayDetail) -> BattleStatsResult:
+        """partial 录像：盒子 battleLog 反查 arena_id → battledetail（失败降级中文提示）。"""
+        module = _load_module("src.stats.box_client", CAPABILITY_MODULES["box"][1])
+        kwargs = {
+            "config": self.cfg,
+            "cfg": self.cfg,
+            "conn": self._thread_conn(),
+            "detail": detail,
+            "replay": detail,
+            "force_refresh": False,
+        }
+        client = self._make_box_client(module, kwargs)
+        before = int(getattr(client, "request_count", 0) or 0) if client is not None else 0
+        raw = None
+        if client is not None:
+            for name in ("get_partial_battle_stats", "fetch_partial_battle_stats"):
+                func = getattr(client, name, None)
+                if callable(func):
+                    raw = _call_adaptive(func, **kwargs)
+                    if raw is not None:
+                        break
+        after = int(getattr(client, "request_count", 0) or 0) if client is not None else 0
+        cached = bool(raw is not None and after == before)
+        if raw is None:
+            last_error = getattr(client, "last_error", None) if client is not None else None
+            return BattleStatsResult(
+                available=False,
+                cached=False,
+                message=(
+                    "partial 局战绩暂不可用：%s；请稍后再试"
+                    "（盒子限流或未匹配到战报，战斗日志约保留最近 1100 局）"
+                    % (last_error or "未匹配到战报")
+                ),
+            )
+        stats = self._normalize_battle_stats(raw, detail)
+        if stats is None or getattr(stats, "status", "") != models.STATS_STATUS_OK:
+            return BattleStatsResult(
+                available=False,
+                cached=cached,
+                message="partial 局已匹配 arena_id，但盒子当局战绩暂不可用（接口失败或冷却），请稍后再试",
+            )
+        return BattleStatsResult(
+            stats=stats,
+            available=True,
+            cached=cached,
+            message="数据来自偶游盒子（partial 局按战斗日志反查 arena_id；仅供参考、非官方数据）",
+            outcome_label=getattr(stats, "outcome_label", "") or "",
+            score=getattr(stats, "score", "") or "",
+        )
 
     def _within_battle_stats_window(self, detail: models.ReplayDetail) -> bool:
         """对局时间是否在战绩接口覆盖窗口内。"""
@@ -1216,6 +1400,7 @@ class AppService:
             "replay": detail,
         }
         client = self._make_box_client(module, kwargs)
+        before = int(getattr(client, "request_count", 0) or 0) if client is not None else 0
         raw = None
         if client is not None:
             for name in ("get_battle_stats", "fetch_battle_detail", "fetch_battledetail", "battledetail"):
@@ -1230,12 +1415,16 @@ class AppService:
                 if callable(func):
                     raw = _call_adaptive(func, **kwargs)
                     break
+        after = int(getattr(client, "request_count", 0) or 0) if client is not None else 0
+        cached = bool(raw is not None and client is not None and after == before)
         if raw is None:
             return BattleStatsResult(
                 available=False,
                 message="当局战绩暂不可用（接口无数据或请求失败；已按 A7 仅打开该局时请求一次）",
             )
-        return self._battle_stats_from_raw(raw, detail, client)
+        result = self._battle_stats_from_raw(raw, detail, client)
+        result.cached = cached
+        return result
 
     def _make_box_client(self, module: Any, kwargs: dict) -> Any:
         """构造 T3 的 ``BoxClient``（签名差异时退回无参构造）。"""
@@ -1282,15 +1471,19 @@ class AppService:
                 source="box",
                 status=models.STATS_STATUS_OK,
                 players=list(players),
+                score=battle_score_from_payload(raw),
             )
         else:
             stats = self._normalize_battle_stats(raw, detail)
         if stats is None or getattr(stats, "status", "") != models.STATS_STATUS_OK:
             return BattleStatsResult(available=False, message="当局战绩暂不可用（接口返回异常），主表不受影响")
+        if not getattr(stats, "score", ""):
+            stats.score = battle_score_from_payload(raw)
         return BattleStatsResult(
             stats=stats,
             available=True,
             message="数据来自偶游盒子（仅供参考、非官方数据，不作为开挂或处罚依据）",
+            score=getattr(stats, "score", "") or "",
         )
 
     def _normalize_battle_stats(self, raw: Any, detail: models.ReplayDetail) -> Optional[models.BattleStats]:
@@ -1344,7 +1537,8 @@ class AppService:
         }
         client = self._make_box_client(module, kwargs)
         cache_get = getattr(client, "_cache_get_player_stats", None) if client is not None else None
-        if callable(cache_get) and matched.dbid:
+        # 缓存口径由 stats 模块负责（默认同自然日命中）；手动刷新（force=True）跳过缓存。
+        if not force and callable(cache_get) and matched.dbid:
             cached = _call_adaptive(cache_get, account_id=int(matched.dbid))
             if cached is not None:
                 return PlayerStatsResult(
@@ -1377,6 +1571,47 @@ class AppService:
             stats=stats,
             available=True,
             message="数据来自偶游盒子 index（最近 1500 场标准局口径，仅供参考、非官方数据）",
+        )
+
+    def peek_player_stats_cache(self, matched: models.MatchedPlayer) -> Optional[PlayerStatsResult]:
+        """只读本地缓存的玩家综合战绩（界面选中玩家时调用，**零网络**）。
+
+        - 有缓存（即使跨天过期）→ 返回 ``PlayerStatsResult(available=True)``，message
+          带缓存时间，提示点「刷新综合战绩」更新；
+        - 无缓存 / 无 dbid / 战绩模块不可用 → 返回 ``None``；
+        - 不 sleep、不发请求、不触发熔断；刷新由界面手动按钮走 ``get_player_stats(force=True)``。
+        """
+        if matched is None:
+            return None
+        account_id = getattr(matched, "dbid", None)
+        if account_id is None:
+            return None
+        if self._mock:
+            stats = mock_data.build_player_stats(matched)
+            return PlayerStatsResult(
+                stats=stats,
+                available=True,
+                message="演示数据（mock）：综合战绩缓存",
+            )
+        if not self._capabilities.get("box"):
+            return None
+        try:
+            module = _load_module("src.stats.box_client", CAPABILITY_MODULES["box"][1])
+            kwargs = {"config": self.cfg, "cfg": self.cfg, "conn": self._thread_conn()}
+            client = self._make_box_client(module, kwargs)
+            peek = getattr(client, "peek_player_stats", None) if client is not None else None
+            if not callable(peek):
+                return None
+            stats = _call_adaptive(peek, account_id=int(account_id), dbid=int(account_id))
+        except Exception:  # noqa: BLE001 - 只读缓存失败按无缓存处理，不影响界面
+            return None
+        if stats is None:
+            return None
+        cached_at = format_iso_text(getattr(stats, "fetched_at", None))
+        return PlayerStatsResult(
+            stats=stats,
+            available=True,
+            message="盒子缓存于 %s，点「刷新综合战绩」更新" % cached_at,
         )
 
     def _normalize_player_stats(self, raw: Any, matched: models.MatchedPlayer) -> Optional[models.PlayerStats]:
@@ -1438,8 +1673,9 @@ def main(argv: list) -> int:
            query.summary["nickname_hits"], query.summary["yellow"], query.summary["red"])
     )
     battle = service.get_battle_stats(query.replay)
-    print("      当局战绩：available=%s 人数=%d 提示=%s"
-          % (battle.available, len(getattr(battle.stats, "players", []) or []), battle.message))
+    print("      当局战绩：available=%s 人数=%d 胜负=%s 比分=%s 缓存=%s 提示=%s"
+          % (battle.available, len(getattr(battle.stats, "players", []) or []),
+             battle.outcome_label or "—", battle.score or "—", battle.cached, battle.message))
     hit = next(item for item in query.matches if item.is_hit)
     player_stats = service.get_player_stats(hit)
     print("      综合战绩：available=%s 战力=%s 胜率=%s 提示=%s"
@@ -1450,10 +1686,11 @@ def main(argv: list) -> int:
     partial_query = service.query_replay(partial_replay)
     partial_battle = service.get_battle_stats(partial_query.replay)
     print(
-        "[5/5] partial 局：玩家=%d 命中=%d 全部仅昵称匹配=%s；当局战绩 available=%s（%s）"
+        "[5/5] partial 局：玩家=%d 命中=%d 全部仅昵称匹配=%s；当局战绩 available=%s 胜负=%s（%s）"
         % (partial_query.summary["total"], partial_query.summary["hits"],
            all(item.partial for item in partial_query.matches if item.is_hit),
-           partial_battle.available, partial_battle.message)
+           partial_battle.available, partial_battle.outcome_label or "—",
+           partial_battle.message)
     )
     service.dispose()
     print("[done] service mock 全流程自检通过，耗时 %.2f 秒" % (time.time() - start))

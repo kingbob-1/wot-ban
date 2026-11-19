@@ -43,13 +43,23 @@ try:
     from .. import models
     from ..app.service import format_iso_text
     from . import theme
-    from .table_model import match_label
+    from .table_model import (
+        format_combat_int,
+        match_label,
+        team_display,
+        vehicle_display,
+    )
 except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from src import models
     from src.app.service import format_iso_text
     from src.ui import theme
-    from src.ui.table_model import match_label
+    from src.ui.table_model import (
+        format_combat_int,
+        match_label,
+        team_display,
+        vehicle_display,
+    )
 
 
 # F2：BanRecord.source_type -> 界面文案（官方 CSV/xlsx/JSON）。
@@ -229,16 +239,51 @@ class ScrollableComboBox(QComboBox):
         super().wheelEvent(event)
 
 
+# 当局战绩字段（盒子 battledetail 同款顺序）：(战绩字段, 展示名)。
+# 「坦克」显示游戏车名（盒子 tank_title 优先，缺失时用 game_names 兜底）。
+BATTLE_FIELDS = [
+    ("tank", "坦克"),
+    ("combat", "本局战力"),
+    ("xp", "经验值"),
+    ("shots", "射击"),
+    ("piercings", "击穿"),
+    ("damage", "造成伤害"),
+    ("hits_received", "被击中"),
+    ("potential_damage", "受到的潜在伤害"),
+    ("damage_blocked", "装甲抵消伤害"),
+    ("spotted", "发现敌人"),
+    ("vehicles_damaged", "击伤敌方战车"),
+    ("kills", "击毁敌方战车"),
+    ("assisted_damage", "协助盟友造成伤害"),
+    ("capture_points", "占领敌方基地点数"),
+    ("defense_points", "保卫基地防御点数"),
+    ("mileage", "行驶里程"),
+]
+# 每行展示 3 组「字段名 + 值」，紧凑多列（右侧面板宽度有限）。
+BATTLE_FIELDS_PER_ROW = 3
+
+
 class PlayerDetailPanel(QWidget):
-    """右侧明细面板：玩家信息 + 封禁记录 + 当局战绩 + 综合战绩点查。"""
+    """右侧明细面板：玩家信息 + 封禁记录 + 当局战绩 + 综合战绩点查。
+
+    - 当局战绩：按盒子 battledetail 字段顺序展示（坦克 / 本局战力 / 经验值 /
+      射击 / 击穿 / 造成伤害 / 被击中 / 受到的潜在伤害 / 装甲抵消伤害 / 发现敌人 /
+      击伤敌方战车 / 击毁敌方战车 / 协助盟友造成伤害 / 占领敌方基地点数 /
+      保卫基地防御点数 / 行驶里程），坦克显示游戏车名；
+    - 阵营按「绿方 = 录像者本人所在队」口径展示；
+    - 综合战绩：选中玩家只展示已缓存结果（不发请求），「查看综合战绩」按缓存优先
+      手动点查、「刷新综合战绩」强制刷新（force_refresh=True）。
+    """
 
     player_stats_requested = Signal(object) if Signal is not None else None
+    player_stats_refresh_requested = Signal(object) if Signal is not None else None
 
     def __init__(self, parent: Any = None) -> None:
         super().__init__(parent)
         self._player = None
         self._records: list = []
         self._current_source_url = ""
+        self._recorder_team: Any = None
         self._build_ui()
         self.clear()
 
@@ -346,7 +391,7 @@ class PlayerDetailPanel(QWidget):
         record_layout.addWidget(self.record_hint)
         layout.addWidget(record_card)
 
-        # 当局战绩
+        # 当局战绩（盒子同款明细，紧凑多列）
         battle_card = QFrame()
         battle_card.setObjectName("Card")
         battle_layout = QVBoxLayout(battle_card)
@@ -356,50 +401,56 @@ class PlayerDetailPanel(QWidget):
         battle_title.setObjectName("SectionTitle")
         battle_layout.addWidget(battle_title)
         self.battle_grid = QGridLayout()
-        self.battle_grid.setHorizontalSpacing(18)
-        self.battle_grid.setVerticalSpacing(6)
+        self.battle_grid.setHorizontalSpacing(12)
+        self.battle_grid.setVerticalSpacing(3)
         self.battle_values = {}
-        battle_fields = [
-            ("combat", "本局战力"),
-            ("damage", "伤害"),
-            ("kills", "击杀"),
-            ("xp", "经验"),
-            ("hit_rate", "命中率"),
-            ("spotted", "点亮"),
-        ]
-        for index, (key, label) in enumerate(battle_fields):
+        for index, (key, label) in enumerate(BATTLE_FIELDS):
             name_label = QLabel(label)
             name_label.setObjectName("FieldName")
             value_label = QLabel("—")
             value_label.setObjectName("StatsValue")
             self.battle_values[key] = value_label
-            row = index // 3
-            column = (index % 3) * 2
+            row = index // BATTLE_FIELDS_PER_ROW
+            column = (index % BATTLE_FIELDS_PER_ROW) * 2
             self.battle_grid.addWidget(name_label, row, column)
             self.battle_grid.addWidget(value_label, row, column + 1)
         battle_layout.addLayout(self.battle_grid)
         layout.addWidget(battle_card)
 
-        # 综合战绩
+        # 综合战绩（缓存优先展示 + 手动查看 / 刷新）
         player_card = QFrame()
         player_card.setObjectName("Card")
         player_layout = QVBoxLayout(player_card)
         player_layout.setContentsMargins(14, 12, 14, 12)
         player_layout.setSpacing(8)
-        title_row = QHBoxLayout()
-        player_title = QLabel("综合战绩（%s）" % PLAYER_STATS_SCOPE)
+        player_title = QLabel("综合战绩（偶游盒子 · 近 1500 场 · 仅供参考）")
         player_title.setObjectName("SectionTitle")
         player_title.setWordWrap(True)
         player_title.setToolTip("数据口径：%s。盒子 index 为近 1500 场标准局统计，非官方数据。" % PLAYER_STATS_SCOPE)
         self.player_title = player_title
-        self.player_stats_button = QPushButton("点查综合战绩")
+        player_layout.addWidget(player_title)
+        button_row = QHBoxLayout()
+        button_row.setSpacing(6)
+        self.player_stats_button = QPushButton("查看综合战绩")
         self.player_stats_button.setObjectName("Ghost")
         self.player_stats_button.setEnabled(False)
-        self.player_stats_button.setToolTip("点查综合战绩：%s（≥2 秒限流、缓存 12–24 小时）" % PLAYER_STATS_SCOPE)
-        title_row.addWidget(player_title)
-        title_row.addStretch(1)
-        title_row.addWidget(self.player_stats_button)
-        player_layout.addLayout(title_row)
+        self.player_stats_button.setToolTip(
+            "查看综合战绩（缓存优先，未命中才点查）：%s（≥2 秒限流、按自然日缓存）" % PLAYER_STATS_SCOPE
+        )
+        self.refresh_player_stats_button = QPushButton("刷新综合战绩")
+        self.refresh_player_stats_button.setObjectName("Ghost")
+        self.refresh_player_stats_button.setEnabled(False)
+        self.refresh_player_stats_button.setToolTip(
+            "强制刷新综合战绩（force_refresh=True，忽略当日缓存重新点查）：%s" % PLAYER_STATS_SCOPE
+        )
+        button_row.addWidget(self.player_stats_button)
+        button_row.addWidget(self.refresh_player_stats_button)
+        button_row.addStretch(1)
+        player_layout.addLayout(button_row)
+        self.player_stats_meta = QLabel("")
+        self.player_stats_meta.setObjectName("StatsHint")
+        self.player_stats_meta.setWordWrap(True)
+        player_layout.addWidget(self.player_stats_meta)
         self.player_grid = QGridLayout()
         self.player_grid.setHorizontalSpacing(18)
         self.player_grid.setVerticalSpacing(6)
@@ -421,17 +472,23 @@ class PlayerDetailPanel(QWidget):
         layout.addStretch(1)
 
         self.player_stats_button.clicked.connect(self._on_player_stats_clicked)
+        self.refresh_player_stats_button.clicked.connect(self._on_player_stats_refresh_clicked)
 
     # ------------------------------------------------------------ 交互
     def _on_player_stats_clicked(self) -> None:
         if self._player is not None and self.player_stats_requested is not None:
             self.player_stats_requested.emit(self._player)
 
+    def _on_player_stats_refresh_clicked(self) -> None:
+        if self._player is not None and self.player_stats_refresh_requested is not None:
+            self.player_stats_refresh_requested.emit(self._player)
+
     # ------------------------------------------------------------ 更新
     def clear(self) -> None:
         """清空为初始空态。"""
         self._player = None
         self._records = []
+        self._recorder_team = None
         self.name_label.setText("未选择玩家")
         self.sub_label.setText("在左侧结果表中点击一行查看明细")
         self.record_title.setText("封禁记录")
@@ -441,24 +498,27 @@ class PlayerDetailPanel(QWidget):
         self.record_hint.setVisible(True)
         for label in self.battle_values.values():
             label.setText("—")
-        for label in self.player_values.values():
-            label.setText("—")
+        self._reset_player_stats()
         self.player_stats_button.setEnabled(False)
+        self.refresh_player_stats_button.setEnabled(False)
         theme.set_badge(self.match_badge, "—", "none")
         theme.set_badge(self.level_badge, "未命中", "none")
 
-    def set_player(self, player: Any, stats_map: dict, stats_state: str, stats_message: str = "") -> None:
-        """展示选中玩家的封禁记录与当局战绩。"""
+    def set_player(self, player: Any, stats_map: dict, stats_state: str, stats_message: str = "",
+                   recorder_team: Any = None) -> None:
+        """展示选中玩家的封禁记录与当局战绩（阵营按「绿方 = 本人队」口径）。"""
         self._player = player
+        self._recorder_team = recorder_team
         if player is None:
             self.clear()
             return
+        stats = self._stats_for(player, stats_map)
         self.name_label.setText(player.nickname or "（无昵称）")
         sub_parts = []
         sub_parts.append("账号 ID：%s" % (player.dbid if player.dbid else "—（partial 录像无 ID）"))
         sub_parts.append("军团：%s" % (player.clan_abbrev or "—"))
-        sub_parts.append("坦克：%s" % (player.tank or "—"))
-        sub_parts.append("阵营：%s" % ("绿方" if player.team == 1 else ("红方" if player.team == 2 else "—")))
+        sub_parts.append("坦克：%s" % vehicle_display(player, stats))
+        sub_parts.append("阵营：%s" % team_display(getattr(player, "team", None), recorder_team))
         self.sub_label.setText("　·　".join(sub_parts))
 
         label_text = match_label(player)
@@ -481,6 +541,7 @@ class PlayerDetailPanel(QWidget):
         self._fill_battle(player, stats_map, stats_state)
         self._reset_player_stats()
         self.player_stats_button.setEnabled(bool(player.is_hit))
+        self.refresh_player_stats_button.setEnabled(bool(player.is_hit))
 
     def _fill_records(self, player: Any) -> None:
         records = list(player.records or [])
@@ -568,39 +629,64 @@ class PlayerDetailPanel(QWidget):
             QApplication.clipboard().setText(url)
         self.source_hint.setText("已复制来源公告链接：%s" % url)
 
-    def _fill_battle(self, player: Any, stats_map: dict, stats_state: str) -> None:
-        stats = stats_map.get(("id", int(player.dbid))) if player.dbid is not None else None
-        if stats is None and player.nickname:
+    def _stats_for(self, player: Any, stats_map: dict) -> Any:
+        """按 dbid 优先、昵称兜底取某玩家的当局战绩对象。"""
+        dbid = getattr(player, "dbid", None)
+        stats = stats_map.get(("id", int(dbid))) if dbid is not None else None
+        if stats is None and getattr(player, "nickname", None):
             stats = stats_map.get(("nick", player.nickname))
-        if stats is None:
-            for label in self.battle_values.values():
-                label.setText("…" if stats_state == "loading" else "—")
-            return
-        self.battle_values["combat"].setText(self._fmt(stats.combat))
-        self.battle_values["damage"].setText(self._fmt(stats.damage))
-        self.battle_values["kills"].setText(self._fmt(stats.kills))
-        self.battle_values["xp"].setText(self._fmt(stats.xp))
-        shots = getattr(stats, "shots", None)
-        piercings = getattr(stats, "piercings", None)
-        if shots:
-            self.battle_values["hit_rate"].setText("%.1f%%" % (float(piercings or 0) * 100.0 / float(shots)))
-        else:
-            self.battle_values["hit_rate"].setText("—")
-        self.battle_values["spotted"].setText(self._fmt(getattr(stats, "spotted", None)))
+        return stats
 
+    @staticmethod
+    def _stat_value(stats: Any, name: str) -> Any:
+        """取当局战绩字段（dataclass / dict 均可）；缺失返回 None。"""
+        if stats is None:
+            return None
+        if isinstance(stats, dict):
+            return stats.get(name)
+        return getattr(stats, name, None)
+
+    def _fill_battle(self, player: Any, stats_map: dict, stats_state: str) -> None:
+        """当局战绩：按盒子字段顺序填充；缺失显示「—」，加载中显示「…」。"""
+        stats = self._stats_for(player, stats_map)
+        placeholder = "…" if stats_state == "loading" else "—"
+        for key, _label in BATTLE_FIELDS:
+            if key == "tank":
+                # 坦克始终显示车名（盒子 tank_title 优先，其次 game_names 兜底）。
+                self.battle_values["tank"].setText(vehicle_display(player, stats))
+                continue
+            if stats is None:
+                self.battle_values[key].setText(placeholder)
+                continue
+            value = self._stat_value(stats, key)
+            if key == "combat":
+                self.battle_values[key].setText(format_combat_int(value))
+            else:
+                self.battle_values[key].setText(self._fmt_plain(value))
+
+    # ------------------------------------------------------------ 综合战绩
     def _reset_player_stats(self) -> None:
+        """综合战绩区回到「未查询」空态（不发请求）。"""
         for label in self.player_values.values():
             label.setText("—")
+        self.player_stats_meta.setText("")
 
-    def set_player_stats_loading(self) -> None:
-        """综合战绩请求中。"""
+    def set_player_stats_loading(self, refresh: bool = False) -> None:
+        """综合战绩请求中（手动查看 / 强制刷新时调用）。"""
         for label in self.player_values.values():
             label.setText("…")
+        if refresh:
+            self.player_stats_meta.setText("正在刷新综合战绩（force_refresh=True，忽略当日缓存）…")
+        else:
+            self.player_stats_meta.setText("正在读取综合战绩（缓存优先）…")
 
-    def show_player_stats(self, result: Any) -> None:
-        """展示综合战绩结果（PlayerStatsResult）。"""
+    def show_player_stats(self, result: Any, from_cache: bool = False) -> None:
+        """展示综合战绩结果（PlayerStatsResult）；含数据更新时间 / 缓存时间。"""
         if result is None or not getattr(result, "available", False):
             self._reset_player_stats()
+            message = getattr(result, "message", "") if result is not None else ""
+            if message:
+                self.player_stats_meta.setText(message)
             return
         stats = result.stats
         self.player_values["combat_power"].setText(self._fmt(getattr(stats, "combat_power", None)))
@@ -608,6 +694,21 @@ class PlayerDetailPanel(QWidget):
         self.player_values["win_rate"].setText("%.1f%%" % float(win_rate) if win_rate is not None else "—")
         self.player_values["avg_damage"].setText(self._fmt(getattr(stats, "avg_damage", None)))
         self.player_values["battles_hint"].setText(self._fmt(getattr(stats, "battles_hint", None)))
+        meta_parts = []
+        update_time = format_iso_text(getattr(stats, "update_time", None))
+        fetched_at = format_iso_text(getattr(stats, "fetched_at", None))
+        if update_time and update_time != "—":
+            meta_parts.append("数据更新时间：%s" % update_time)
+        if from_cache:
+            # 选中玩家只读缓存展示：标注缓存时间并提示手动刷新（不发请求）。
+            if fetched_at and fetched_at != "—":
+                meta_parts.append("缓存于 %s（点刷新更新）" % fetched_at)
+        elif fetched_at and fetched_at != "—":
+            meta_parts.append("缓存时间：%s" % fetched_at)
+        message = getattr(result, "message", "") or ""
+        if "缓存" in message and not from_cache:
+            meta_parts.append("缓存命中")
+        self.player_stats_meta.setText(" ｜ ".join(meta_parts))
 
     def _fmt(self, value: Any) -> str:
         if value is None:
@@ -619,6 +720,18 @@ class PlayerDetailPanel(QWidget):
         if abs(number - round(number)) < 0.05:
             return "{:,}".format(int(round(number)))
         return "{:,.1f}".format(number)
+
+    def _fmt_plain(self, value: Any) -> str:
+        """紧凑数字（不加千分位，贴近盒子原始展示）；None -> —。"""
+        if value is None:
+            return "—"
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+        if abs(number - round(number)) < 0.05:
+            return str(int(round(number)))
+        return "%.1f" % number
 
 
 class DataStatusDialog(QDialog):

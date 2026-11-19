@@ -73,6 +73,19 @@ QLabel#SectionTitle {
     font-weight: 700;
     color: #0f172a;
 }
+/* 「查询结果」标题行：本局胜负平（胜绿 / 平橙 / 负红），随异步战绩更新 */
+QLabel#SectionTitle[outcome="victory"] {
+    color: #15803d;
+}
+QLabel#SectionTitle[outcome="draw"] {
+    color: #b45309;
+}
+QLabel#SectionTitle[outcome="defeat"] {
+    color: #b91c1c;
+}
+QLabel#SectionTitle[outcome="loading"] {
+    color: #6b7280;
+}
 QLabel#FieldName {
     color: #6b7280;
     font-size: 9pt;
@@ -108,7 +121,7 @@ QLabel#DetailSub {
     font-size: 9pt;
 }
 QLabel#StatsValue {
-    font-size: 10pt;
+    font-size: 9pt;
     font-weight: 600;
     color: #111827;
 }
@@ -223,6 +236,23 @@ QTableView {
     alternate-background-color: #fafbfd;
     selection-background-color: #dbeafe;
     selection-color: #111827;
+}
+/* 结果表：24 列 + 30/60 人，压缩字体 / 行高 / 内边距保证一屏 30 人（需求 6） */
+QTableView#ResultTable {
+    font-size: 7.5pt;
+}
+QTableView#ResultTable QWidget {
+    font-size: 7.5pt;
+}
+QTableView#ResultTable QHeaderView {
+    font-size: 7.5pt;
+}
+QTableView#ResultTable QHeaderView::section {
+    padding: 2px 2px;
+    font-size: 7.5pt;
+}
+QTableView#ResultTable::item {
+    padding: 0px 2px;
 }
 QHeaderView::section {
     background: #f3f6fb;

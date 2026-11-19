@@ -26,7 +26,10 @@ def test_contract_modules_import():
     assert callable(db.set_meta)
     assert models.MATCH_TYPE_ID == "id"
     assert models.LEVEL_RED == "red"
-    assert len(db.EXPECTED_TABLES) == 9
+    assert len(db.EXPECTED_TABLES) == 12
+    assert "replay_arena_map" in db.EXPECTED_TABLES
+    assert "battlelog_anchor" in db.EXPECTED_TABLES
+    assert "battlelog_cap" in db.EXPECTED_TABLES
 
 
 def test_config_defaults():
@@ -40,8 +43,8 @@ def test_config_defaults():
     assert "common_logger" not in str(cfg.db_path)
 
 
-def test_init_schema_creates_nine_tables(tmp_path):
-    """临时库建表：9 张表 + schema_version + meta 往返。"""
+def test_init_schema_creates_twelve_tables(tmp_path):
+    """临时库建表：12 张表（含 v2 replay_arena_map / battlelog_anchor / battlelog_cap）。"""
     db_path = tmp_path / "wotban-test.db"
     conn = db.connect(db_path)
     try:
