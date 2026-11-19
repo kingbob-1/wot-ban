@@ -34,69 +34,22 @@
 - **结果筛选**：「只看命中」「仅看 ID 命中」「标色筛选」，可快速缩小到需要关注的行。
 - **明细面板**：选中玩家查看全部封禁记录（批次日期 / 原因 / 时长 / 次数 / 来源链接 / 抓取时间）、账号 ID、军团缩写、当前局坦克。
 - **当局战绩（按需）**：打开 180 天内的完整对局时按需请求 1 次（本局战力、伤害、击杀、经验、命中率等）；超期局、partial 局**不发起请求**。
-- **综合战绩（点查）**：仅在点「点查综合战绩」时请求（≥2 秒限流、本地缓存 12–24 小时），标注来源与更新时间；口径为「偶游盒子 · 最近 1500 场标准局」。
+- **综合战绩（点查）**：仅在点「点查综合战绩」时请求（≥2 秒限流、本地缓存 12–24 小时）；口径为「偶游盒子 · 最近 1500 场标准局」，**非官方数据、仅供参考**。
 - **数据状态页**：批次数 / 库内条数（去重入库）/ 官方源（物理行）/ `wgid` 覆盖 / 缺失批次 / 覆盖区间 / 录像索引数；另含本机环境区（游戏目录、录像目录、我的账号、最近对局时间）；一键打开数据目录、日志目录；「清空名单库」「重建名单库」带二次确认。
 - **隐私友好**：全本地运行，无遥测、不上传、不导出名单数据；仓库与发行包不含名单数据、数据库与日志，也**不含任何界面截图**。
 
 ## 安装与启动
 
-### 方式一：便携包（推荐普通用户）
+### 便携包（推荐普通用户）
 
 从 [GitHub Releases](https://github.com/kingbob-1/wot-ban/releases) 下载 **Windows 便携压缩包**（内嵌 CPython 3.12 + PySide6 + 源码 + 启动器，约 250 MB），解压到任意目录后**双击 `坦克世界封号查询.exe`** 即可，**无需安装 Python**。
 
 - 首次启动会自动探测游戏目录/录像目录/我的账号，不需要手点或填写路径；
-- `run.bat` 仍然保留，作为开发/排障备用入口（自动使用包内 Python 启动源码）。
-
-### 方式二：源码运行（开发者）
-
-环境要求：Windows 10 / 11 + Python 3.12 + PySide6 6.x。
-
-```bat
-git clone https://github.com/kingbob-1/wot-ban.git
-cd wot-ban
-python -m pip install PySide6
-python main.py            :: 启动 GUI（开发方式）
-```
-
-### 本机自用（开发者工作区环境）
-
-本机自用放在 `<项目目录>\`，Python 使用工作区共享便携运行时 `..\runtime\python.exe`：
-
-- **日常启动**：双击项目根目录的 `坦克世界封号查询.exe`（启动器会自动查找可用的 `pythonw.exe` 并运行 `main.py`）；
-- **开发备用**：双击 `run.bat`（自动定位 `..\runtime\python.exe`，优先 `pythonw.exe` 无控制台启动）。
-
-```bat
-"..\runtime\python.exe" -m pip install PySide6 -i https://pypi.tuna.tsinghua.edu.cn/simple
-run.bat
-```
-
-### 构建启动器（发布者）
-
-根目录的 `坦克世界封号查询.exe` 是**薄启动器**：只负责解析解释器并拉起 `main.py`，不内嵌 Python 与业务代码，因此更新源码后无需重新编译。
-
-```bat
-build_launcher.bat            :: 一键：生成原创图标 → 生成 C# 源码 → csc 编译 → 输出 坦克世界封号查询.exe
-build_launcher.bat --check    :: 只检查构建环境（.NET Framework csc / Pillow）
-```
-
-- 实现脚本 `scripts/build_launcher.py`；图标由 Pillow 绘制**原创坦克剪影**（不使用任何官方素材）；
-- 启动器为 C# WinExe 薄壳，使用 Windows 自带的 .NET Framework（`csc.exe`）编译，不引入第三方运行时；
-- 解释器查找顺序：包内 `runtime\pythonw.exe` → 开发布局 `..\runtime\pythonw.exe` → PATH 中的 `pythonw.exe`；启动失败会弹中文提示。
-- 启动器详细说明见 [docs/P4-启动器.md](docs/P4-启动器.md)。
-
-### 构建便携包（发布者）
-
-```bat
-build_portable.bat --dry-run      :: 先预览步骤（不下载、不打包）
-build_portable.bat                :: 实际构建：下载便携 CPython → pip install PySide6 → 复制源码/启动器 → 打 zip
-build_portable.bat --proxy http://127.0.0.1:7897   :: 需要代理时（也可用于 pip 镜像）
-```
-
-构建产物在 `dist\wot-ban-portable-<version>-win64.zip`。便携包 = 薄启动器 + 内嵌 CPython + PySide6 + 源码；**不把整个应用打包成单个大 exe**（Qt 动态库可替换，符合 LGPL 要求）。
+- 如启动器无法启动，可改用包内 `run.bat` 作为排障备用入口（自动使用包内 Python 启动源码）。
 
 ## 使用流程
 
-1. **启动**：双击 `坦克世界封号查询.exe`；首次启动自动探测本机环境并显示「游戏目录 / 我的账号」，无需手动设置（探测失败可点「重新检测」或「手动选择游戏目录」，选择后会记住）。随后自动建库并从官方公开接口抓取名单（约 5–6 分钟，低频只读请求；本机自用若已有本地名单归档则直接从归档导入，无需联网）。
+1. **启动**：双击 `坦克世界封号查询.exe`；首次启动自动探测本机环境（游戏目录 / 录像目录 / 我的账号），无需手动设置（探测失败可点「重新检测」或「手动选择游戏目录」，选择后会记住）。随后自动建库并从官方公开接口抓取名单（约 5–6 分钟，低频只读请求；本机若已有本地名单归档则直接从归档导入，无需联网）。
 2. **更新名单**：工具启动时自动检查、运行期间每 6 小时检查一次；也可以手动点「更新名单」。
 3. **选择录像**：点「最新完整录像」「最近 7 天」「全部录像」或「手动选择…」加载一局；扫描有进度条，可取消。
 4. **看结果**：结果表列出本局全部玩家，命中历史名单的行黄底/红底高亮，标注封禁次数、最近封禁日期、原因、时长与匹配方式；点击表头可排序，勾选筛选框可只看命中。
@@ -152,56 +105,6 @@ build_portable.bat --proxy http://127.0.0.1:7897   :: 需要代理时（也可�
 | 薄启动器（C# / .NET Framework） | Windows 系统组件 | 使用 Windows 自带的 .NET Framework 4.x `csc` 编译为 WinExe 薄壳，不随包分发第三方运行时；图标为项目原创绘制 |
 
 详见 **[docs/第三方组件许可.md](docs/第三方组件许可.md)**。
-
-## 项目结构
-
-```text
-wot-ban/
-  坦克世界封号查询.exe      # 薄启动器（构建产物；双击即启动 GUI，更新源码无需重编）
-  main.py                 # 入口：参数解析 + GUI 启动 / 建库
-  run.bat                 # 开发/排障备用启动（本机自用：定位工作区 runtime）
-  build_launcher.bat      # 启动器构建入口（发布者用）
-  build_portable.bat      # 便携包构建入口（发布者用）
-  scripts/
-    build_launcher.py     # 生成原创图标 + C# 源码，调用 csc 编译启动器
-    build_portable.py     # 便携包构建：下载 CPython → pip install PySide6 → 复制源码 → 打 zip
-  assets/
-    app.ico               # 原创坦克剪影图标（多尺寸）
-  src/
-    config.py             # 集中配置（路径 / URL / UA / 限流 / 阈值；支持本机配置覆盖）
-    detect.py             # 本机环境动态探测（游戏目录 / 录像目录 / 我的账号）
-    models.py             # 数据模型（dataclass 契约）
-    logger.py             # 日志（优先工作区 common_logger，失败回退标准 logging）
-    fetcher/              # 名单抓取：JSON / CSV / xlsx 解析、更新检测、wgid 前向滚存
-    store/                # SQLite 建库、名单写入、对账、查询
-    replay/               # 录像扫描、快速索引、完整解析
-    match/                # 双档匹配、黄红判定
-    stats/                # 偶游盒子战绩客户端（180 天窗口、限流、熔断、缓存）
-    ui/                   # PySide6 界面
-    app/                  # 业务门面 + 后台线程
-  docs/
-    使用说明.md            # 用户操作手册
-    第三方组件许可.md       # 第三方许可证与合规说明
-    P4-启动器.md          # 启动器用法 / 构建 / 原创图标声明
-  tests/                  # pytest 测试
-```
-
-> 仓库不保存任何界面截图（v0.2 起：避免名单/账号信息随截图扩散）；出图/QA 脚本仅本地开发使用，不入库。
-
-## 开发与测试
-
-```bat
-:: 使用本机共享运行时
-"..\runtime\python.exe" -m pytest tests -q
-
-:: 其他命令
-"..\runtime\python.exe" main.py --version
-"..\runtime\python.exe" main.py --init-db     :: 初始化 / 升级本地数据库
-```
-
-- 运行入口：`坦克世界封号查询.exe`（用户）或 `python main.py`（开发）；`--mock` 使用内置演示数据（无名单库时用于预览界面）；`--config PATH` 指定配置文件。
-- 本机环境探测：默认开启（配置项 `auto_detect`）；也可在 `config.local.json` 中显式指定 `game_dir` / `replay_dir`，显式值优先。
-- 测试覆盖：名单导入/去重/匹配、录像解析/索引、战绩 180 天窗口与限流、更新语义、环境探测、GUI 交互。
 
 ## 已知限制
 

@@ -32,6 +32,7 @@ docs/P2-*.md
 docs/P2.5-*.md
 docs/P3-*.md
 docs/QA-*.md
+docs/本地开发与构建.md
 
 # QA 临时产物（隔离数据库副本、测试证据、驱动脚本；体积大且含本机痕迹）
 tmp-qa/

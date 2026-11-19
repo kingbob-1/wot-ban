@@ -78,9 +78,9 @@ def main(argv: list) -> int:
     first_elapsed = wait_for_rows(app, window)
     first_rows = window.model.rowCount()
     first_replays = len(window._current_replays)
-    print("[3/5] 首次启动：耗时=%.2fs（要求 ≤%.0fs）结果行=%d 录像=%d 环境=%s / %s"
+    print("[3/5] 首次启动：耗时=%.2fs（要求 ≤%.0fs）结果行=%d 录像=%d 环境=%s"
           % (first_elapsed, DEADLINE_SECONDS, first_rows, first_replays,
-             window.env_game_label.text(), window.env_account_label.text()))
+             window.redetect_button.toolTip().splitlines()[-2:]))
     first_ok = 0 <= first_elapsed <= DEADLINE_SECONDS and first_rows > 0
 
     # 重新检测后再次扫描

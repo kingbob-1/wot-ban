@@ -11,7 +11,9 @@
 - src 内无本机路径硬编码（验收项）。
 """
 import json
+import re
 import struct
+import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -26,7 +28,11 @@ from src import detect  # noqa: E402
 from src.config import Config, load_config  # noqa: E402
 
 MAGIC = bytes.fromhex("12323411")
-LOCAL_HARDCODED_PATTERNS = (r"X:\World_of_Tanks", r"<工作区>\research")
+# 验收守卫：src 内不得写死真实本机路径。
+# 用通用「绝对盘符路径」正则覆盖任意盘符；前缀负向断言排除 URL（https://）与
+# ``%s:\\`` 这类格式串；占位盘符白名单只放行 docstring 示例用的 X:。
+DRIVE_PATH_PATTERN = re.compile(r"(?<![A-Za-z0-9+.\-%])([A-Za-z]):[\\/]")
+PLACEHOLDER_DRIVES = frozenset({"X"})
 ACTION_NOW = datetime(2026, 11, 18, 12, 0, 0).astimezone()
 
 
@@ -342,12 +348,55 @@ def test_public_first_run_without_archive_dir(tmp_path):
 
 
 # ---------------------------------------------------------------- 硬编码验收
+def _hardcoded_drive_paths(text: str) -> list:
+    """返回文本中的真实盘符路径（占位盘符 X: 示例放行；URL / 格式串不误报）。"""
+    hits = []
+    for match in DRIVE_PATH_PATTERN.finditer(text):
+        if match.group(1).upper() in PLACEHOLDER_DRIVES:
+            continue
+        hits.append(match.group(0))
+    return hits
+
+
+def test_machine_path_guard_selfcheck():
+    """守卫自检：真实盘符路径能识别，占位盘符 X: 与 URL 不误报。"""
+    assert _hardcoded_drive_paths("示例：``X:\\World_of_Tanks_CN``") == []
+    assert _hardcoded_drive_paths("https://example.invalid/x") == []
+    assert _hardcoded_drive_paths("%s:\\") == []  # noqa - 模拟 detect.py 的格式串来源
+    assert _hardcoded_drive_paths("D:\\Games\\replays") == ["D:\\"]
+
+
+def _repo_src_files() -> list:
+    """src 下会进入公开仓库的 Python 文件（tracked + 未忽略的新文件）。
+
+    本机开发用的截图 / QA 脚本在 ``.gitignore`` 中排除、不入库，不属公开仓库内容，
+    因此不参与本验收；没有 git 可用时退回扫描整个 ``src`` 目录（宁可多判、不可漏判）。
+    """
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard", "--", "src"],
+            cwd=str(PROJECT_ROOT), capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        result = None
+    if result is not None and result.returncode == 0:
+        files = []
+        for line in result.stdout.splitlines():
+            path = PROJECT_ROOT / line
+            if path.suffix == ".py" and path.is_file():
+                files.append(path)
+        return files
+    return sorted((PROJECT_ROOT / "src").rglob("*.py"))
+
+
 def test_no_machine_paths_hardcoded_in_src():
-    """src 内不得写死本机路径（X:\\World_of_Tanks / <工作区>\\research）。"""
+    """src（入库文件）内不得写死真实盘符路径（占位盘符 X: 的 docstring 示例除外）。"""
     offenders = []
-    for path in (PROJECT_ROOT / "src").rglob("*.py"):
+    for path in _repo_src_files():
         text = path.read_text(encoding="utf-8")
-        for pattern in LOCAL_HARDCODED_PATTERNS:
-            if pattern in text:
-                offenders.append("%s: %s" % (path.relative_to(PROJECT_ROOT), pattern))
+        for match in DRIVE_PATH_PATTERN.finditer(text):
+            if match.group(1).upper() in PLACEHOLDER_DRIVES:
+                continue
+            line_no = text.count("\n", 0, match.start()) + 1
+            offenders.append("%s:%d: %s" % (path.relative_to(PROJECT_ROOT), line_no, match.group(0)))
     assert offenders == [], "发现写死的本机路径：%s" % offenders
