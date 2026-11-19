@@ -1,15 +1,16 @@
 @echo off
 rem wot-ban launcher: locate the shared workspace runtime and start the GUI.
+rem This bat lives in <project>\bat\; the project root is its parent folder.
 setlocal
-set "PROJECT_DIR=%~dp0"
-set "RUNTIME_PY=%PROJECT_DIR%..\runtime\python.exe"
-set "RUNTIME_PYW=%PROJECT_DIR%..\runtime\pythonw.exe"
+set "PROJECT_DIR=%~dp0.."
+set "RUNTIME_PY=%~dp0..\..\runtime\python.exe"
+set "RUNTIME_PYW=%~dp0..\..\runtime\pythonw.exe"
 cd /d "%PROJECT_DIR%"
 
 if not exist "%RUNTIME_PY%" (
     echo [ERROR] Shared Python runtime not found:
     echo         %RUNTIME_PY%
-    echo         This project expects the workspace runtime at ..\runtime\python.exe
+    echo         This project expects the workspace runtime at ..\..\runtime\python.exe
     pause
     exit /b 1
 )
@@ -24,11 +25,11 @@ if errorlevel 1 (
 )
 
 if exist "%RUNTIME_PYW%" (
-    start "" "%RUNTIME_PYW%" "%PROJECT_DIR%main.py" %*
+    start "" "%RUNTIME_PYW%" "%PROJECT_DIR%\src\main.py" %*
     exit /b 0
 )
 
-"%RUNTIME_PY%" "%PROJECT_DIR%main.py" %*
+"%RUNTIME_PY%" "%PROJECT_DIR%\src\main.py" %*
 set "EXIT_CODE=%errorlevel%"
 if not "%EXIT_CODE%"=="0" pause
 exit /b %EXIT_CODE%

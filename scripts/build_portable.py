@@ -9,7 +9,7 @@
 4. 解压到构建目录；
 5. 向便携解释器安装 PySide6（默认清华镜像，可配代理）；
 6. 组装便携包目录：复制源码 + 薄启动器 exe/图标/启动器文档 + 生成便携版 run.bat + 许可证/说明；
-7. 自检：便携解释器 import PySide6、跑 main.py --version；
+7. 自检：便携解释器 import PySide6、跑 src/main.py --version；
 8. 打包 zip 并输出大小与 sha256。
 
 说明
@@ -58,6 +58,11 @@ PLAN_TITLES = [
     "自检便携环境",
     "打包 zip 并输出校验信息",
 ]
+
+# 仅用于本地出图/QA 的开发脚本：被 .gitignore 排除且含本机路径，不得进入便携包
+LOCAL_QA_SCRIPTS = ("screenshot.py", "screenshot_real.py", "run_qa_guarded.py")
+# 复制 src 源码树时的排除规则：Python 缓存/编译产物 + 本地 QA 脚本
+SOURCE_IGNORE_PATTERNS = ("__pycache__", "*.pyc", "*.pyd") + LOCAL_QA_SCRIPTS
 
 
 class BuildError(Exception):
@@ -195,10 +200,14 @@ def print_plan(cfg: BuildConfig, state: BuildState, problems: list) -> None:
 
 # ------------------------------------------------------------------ 环境检查
 def collect_source_files(cfg: BuildConfig) -> dict:
-    """返回需要随便携包分发的源码/说明文件清单。"""
+    """返回需要随便携包分发的源码/说明文件清单。
+
+    注意：``docs/shots/`` 是本地 gitignored 截图目录（含玩家昵称/账号 ID），
+    既不是必需品、也不得进入便携包（发行包承诺不含任何界面截图），故不在此列。
+    """
     root = cfg.project_root
     return {
-        "main.py": root / "main.py",
+        "src/main.py": root / "src" / "main.py",
         "src 目录": root / "src",
         "LICENSE": root / "LICENSE",
         "README.md": root / "README.md",
@@ -207,7 +216,6 @@ def collect_source_files(cfg: BuildConfig) -> dict:
         "docs/P4-启动器.md": root / "docs" / "P4-启动器.md",
         "坦克世界封号查询.exe": root / "坦克世界封号查询.exe",
         "assets/app.ico": root / "assets" / "app.ico",
-        "docs/shots 目录": root / "docs" / "shots",
     }
 
 
@@ -479,7 +487,7 @@ def portable_run_bat_lines() -> list:
         "@echo off",
         "rem wot-ban portable ASCII fallback launcher.",
         "rem Normal use: double-click the launcher exe in this folder.",
-        "rem This bat is an ASCII-only fallback that runs main.py with the bundled runtime.",
+        "rem This bat is an ASCII-only fallback that runs src/main.py with the bundled runtime.",
         "setlocal",
         'set "PROJECT_DIR=%~dp0"',
         'set "PY=%PROJECT_DIR%runtime\\python.exe"',
@@ -503,11 +511,11 @@ def portable_run_bat_lines() -> list:
         "",
         'cd /d "%PROJECT_DIR%"',
         'if exist "%PYW%" (',
-        '    start "" "%PYW%" "%PROJECT_DIR%main.py" %*',
+        '    start "" "%PYW%" "%PROJECT_DIR%src\\main.py" %*',
         "    exit /b 0",
         ")",
         "",
-        '"%PY%" "%PROJECT_DIR%main.py" %*',
+        '"%PY%" "%PROJECT_DIR%src\\main.py" %*',
         'set "EXIT_CODE=%errorlevel%"',
         'if not "%EXIT_CODE%"=="0" pause',
         "exit /b %EXIT_CODE%",
@@ -545,33 +553,46 @@ def build_stage_name(cfg: BuildConfig) -> str:
     return "wot-ban-portable-v%s-win64" % read_app_version(cfg)
 
 
+def source_ignore_patterns():
+    """返回复制 src 源码树时的忽略规则（缓存/编译产物 + 本地 QA 脚本）。"""
+    return shutil.ignore_patterns(*SOURCE_IGNORE_PATTERNS)
+
+
+def assert_qa_scripts_excluded(stage_dir: Path) -> None:
+    """自检：本地 QA 脚本不得进入便携包（被 .gitignore 排除且含本机路径）。"""
+    leaked = []
+    for name in LOCAL_QA_SCRIPTS:
+        for path in sorted(Path(stage_dir).rglob(name)):
+            if path.is_file():
+                leaked.append(path.relative_to(stage_dir).as_posix())
+    if leaked:
+        raise BuildError(
+            "便携包混入本地 QA 脚本：%s" % ", ".join(leaked),
+            "检查 scripts/build_portable.py 的 SOURCE_IGNORE_PATTERNS（src 复制排除规则）",
+        )
+
+
 def copy_source_tree(cfg: BuildConfig, stage_dir: Path) -> None:
-    """把源码与说明文件复制进便携包目录。"""
+    """把源码与说明文件复制进便携包目录（入口 src/main.py 随 src 树复制）。"""
     root = cfg.project_root
     stage_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(root / "main.py", stage_dir / "main.py")
     shutil.copy2(root / "LICENSE", stage_dir / "LICENSE")
     shutil.copy2(root / "README.md", stage_dir / "README.md")
     shutil.copytree(
         root / "src",
         stage_dir / "src",
-        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyd"),
+        ignore=source_ignore_patterns(),
     )
     docs_target = stage_dir / "docs"
     docs_target.mkdir(parents=True, exist_ok=True)
+    # 便携包不带任何界面截图：docs/shots 为本地 gitignored 目录，含玩家昵称/账号 ID，严禁外发
     shutil.copy2(root / "docs" / "使用说明.md", docs_target / "使用说明.md")
     shutil.copy2(root / "docs" / "第三方组件许可.md", docs_target / "第三方组件许可.md")
-    shots_source = root / "docs" / "shots"
-    if shots_source.is_dir():
-        shots_target = docs_target / "shots"
-        shots_target.mkdir(parents=True, exist_ok=True)
-        for image in sorted(shots_source.glob("*.png")):
-            shutil.copy2(image, shots_target / image.name)
     launcher_exe = root / "坦克世界封号查询.exe"
     if not launcher_exe.is_file():
         raise BuildError(
             "缺少薄启动器 exe：%s" % launcher_exe,
-            "先运行项目根的 build_launcher.bat 生成启动器（便携包 = 启动器 + 内嵌运行时 + 源码）",
+            "先运行 bat\\build_launcher.bat 生成启动器（便携包 = 启动器 + 内嵌运行时 + 源码）",
         )
     shutil.copy2(launcher_exe, stage_dir / launcher_exe.name)
     icon_source = root / "assets" / "app.ico"
@@ -586,7 +607,7 @@ def copy_source_tree(cfg: BuildConfig, stage_dir: Path) -> None:
 
 
 def verify_stage(cfg: BuildConfig, stage_dir: Path, python_dir: Path) -> dict:
-    """自检便携环境：import PySide6 / 跑 main.py --version。"""
+    """自检便携环境：import PySide6 / 跑 src/main.py --version。"""
     python_exe = str(bundled_python_exe(python_dir))
     env = subprocess_env(cfg)
     check_code = (
@@ -610,7 +631,7 @@ def verify_stage(cfg: BuildConfig, stage_dir: Path, python_dir: Path) -> dict:
             "检查 PySide6 安装是否完整，或改用其他 PySide6 版本重试",
         )
     version_result = subprocess.run(
-        [python_exe, str(stage_dir / "main.py"), "--version"],
+        [python_exe, str(stage_dir / "src" / "main.py"), "--version"],
         cwd=str(stage_dir),
         env=env,
         capture_output=True,
@@ -620,7 +641,7 @@ def verify_stage(cfg: BuildConfig, stage_dir: Path, python_dir: Path) -> dict:
     )
     if version_result.returncode != 0:
         raise BuildError(
-            "便携环境自检失败：main.py --version 退出码 %d" % version_result.returncode,
+            "便携环境自检失败：src/main.py --version 退出码 %d" % version_result.returncode,
             "检查源码是否完整",
         )
     report = {
@@ -642,7 +663,7 @@ def verify_stage(cfg: BuildConfig, stage_dir: Path, python_dir: Path) -> dict:
         if launcher_result.returncode != 0:
             raise BuildError(
                 "便携包自检失败：启动器 exe --version 退出码 %d" % launcher_result.returncode,
-                "确认包内 runtime\\python.exe、main.py 与启动器布局正确；详细输出：%s"
+                "确认包内 runtime\\python.exe、src\\main.py 与启动器布局正确；详细输出：%s"
                 % ((launcher_result.stderr or "")[-600:]),
             )
         launcher_stdout = (launcher_result.stdout or "").strip()
@@ -756,6 +777,7 @@ def execute_build(cfg: BuildConfig, state: BuildState) -> int:
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
     copy_source_tree(cfg, stage_dir)
+    assert_qa_scripts_excluded(stage_dir)
     print_step(6, total, PLAN_TITLES[5], time.perf_counter() - step_start, "完成（%s）" % stage_dir)
 
     step_start = time.perf_counter()

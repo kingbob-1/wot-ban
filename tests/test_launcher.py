@@ -5,7 +5,7 @@
 - 原创坦克图标存在且包含 16/32/48/64/128/256 六种尺寸；
 - exe 体积在 100 KB 预算内，且 ``--version`` 输出正确版本、退出码 0；
 - 构建脚本 ``--check`` 在开发环境返回 0；
-- ``build_launcher.bat`` 为全 ASCII + CRLF（bat 规范硬要求）。
+- ``bat/build_launcher.bat`` 为全 ASCII + CRLF（bat 规范硬要求）。
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 EXE_PATH = PROJECT_ROOT / "坦克世界封号查询.exe"
 ICON_PATH = PROJECT_ROOT / "assets" / "app.ico"
 BUILD_SCRIPT = PROJECT_ROOT / "scripts" / "build_launcher.py"
-BUILD_BAT = PROJECT_ROOT / "build_launcher.bat"
+BUILD_BAT = PROJECT_ROOT / "bat" / "build_launcher.bat"
 EXPECTED_ICON_SIZES = [(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
 EXE_SIZE_LIMIT = 100 * 1024
 
@@ -104,8 +104,8 @@ def test_build_script_check_mode() -> None:
 
 
 def test_build_bat_ascii_crlf() -> None:
-    """build_launcher.bat 必须全 ASCII 且行尾为 CRLF。"""
-    assert BUILD_BAT.is_file(), "缺少 build_launcher.bat"
+    """bat/build_launcher.bat 必须全 ASCII 且行尾为 CRLF。"""
+    assert BUILD_BAT.is_file(), "缺少 bat/build_launcher.bat"
     data = BUILD_BAT.read_bytes()
     assert data.isascii(), "bat 含非 ASCII 字符"
     crlf_count = data.count(b"\r\n")

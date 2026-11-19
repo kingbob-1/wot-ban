@@ -3,11 +3,11 @@
 
 用法
 ----
-    python main.py                 # 启动 GUI（PySide6 主窗口）
-    python main.py --mock          # 用内置演示数据启动（数据层未就绪时自动启用）
-    python main.py --init-db       # 初始化 / 升级本地 SQLite 数据库
-    python main.py --version       # 打印版本后退出
-    python main.py --config PATH   # 使用指定配置文件
+    python src/main.py                 # 启动 GUI（PySide6 主窗口）
+    python src/main.py --mock          # 用内置演示数据启动（数据层未就绪时自动启用）
+    python src/main.py --init-db       # 初始化 / 升级本地 SQLite 数据库
+    python src/main.py --version       # 打印版本后退出
+    python src/main.py --config PATH   # 使用指定配置文件
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ import time
 import traceback
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 

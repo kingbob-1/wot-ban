@@ -3,9 +3,9 @@
 
 流程
 ----
-1. 检查构建环境（csc.exe / Pillow / main.py / Windows）；
+1. 检查构建环境（csc.exe / Pillow / src/main.py / Windows）；
 2. 用 Pillow 绘制原创坦克剪影图标，写出多尺寸 ICO（16/32/48/64/128/256）；
-3. 生成临时 C# 源码（薄壳：定位 main.py + 解析解释器 + 透传参数）；
+3. 生成临时 C# 源码（薄壳：定位 src/main.py + 解析解释器 + 透传参数）；
 4. 用 csc.exe 编译成 Winexe：``坦克世界封号查询.exe``；
 5. 部署到项目根并自检（``--version`` 输出与退出码）。
 
@@ -64,7 +64,7 @@ CSC_SEARCH_DIRS = (
 # 启动器界面文案（生成 C# 时转成 ASCII 转义字面量）
 UI_TITLE = "坦克世界封号查询"
 UI_PRODUCT = "坦克世界封号查询工具"
-UI_MSG_NO_MAIN = "未找到 main.py，启动器无法继续。\n\n请确认程序已完整解压：main.py 应与本启动器位于同一目录。\n\n当前目录：\n"
+UI_MSG_NO_MAIN = "未找到 src\\main.py，启动器无法继续。\n\n请确认程序已完整解压：src\\main.py 应位于本启动器所在目录的 src 子目录。\n\n当前目录：\n"
 UI_MSG_NO_PYTHON = "未找到可用的 Python 运行环境，无法启动程序。\n\n启动器依次尝试了以下位置：\n"
 UI_MSG_LAUNCH_FAIL = "启动程序失败。\n\n错误详情：\n"
 UI_HINT_FIND_PYTHON = "请确认程序目录中的 runtime 子目录存在，或安装 Python 3.10+ 并加入 PATH。"
@@ -87,7 +87,7 @@ using System.Windows.Forms;
 internal static class Launcher
 {
     private const string AppTitle = @@TITLE@@;
-    private const string MainPyName = "main.py";
+    private const string MainPyName = "src\\main.py";
     private const string MsgNoMainPy = @@MSG_NO_MAIN@@;
     private const string MsgNoPython = @@MSG_NO_PYTHON@@;
     private const string MsgLaunchFail = @@MSG_LAUNCH_FAIL@@;
@@ -136,7 +136,7 @@ internal static class Launcher
                 // argument mode: reuse the parent console so CLI output stays visible
                 AttachConsole(AttachParentProcess);
                 // redirected output (pipe / file): write UTF-8 so automation and
-                // redirection match the Python side (main.py forces UTF-8 stdout)
+                // redirection match the Python side (src/main.py forces UTF-8 stdout)
                 if (HasUsableStdout() && !IsStdoutConsole())
                 {
                     try
@@ -575,8 +575,8 @@ def collect_problems(cfg: LauncherConfig) -> list:
     problems = []
     if platform.system() != "Windows":
         problems.append(("error", "当前系统不是 Windows：exe 启动器仅面向 Windows"))
-    if not (cfg.project_root / "main.py").is_file():
-        problems.append(("error", "缺少产品入口：%s" % (cfg.project_root / "main.py")))
+    if not (cfg.project_root / "src" / "main.py").is_file():
+        problems.append(("error", "缺少产品入口：%s" % (cfg.project_root / "src" / "main.py")))
     pill = probe_pillow()
     if not pill["ok"]:
         problems.append(("error", "Pillow 不可用（生成图标必需）：%s" % pill["error"]))
@@ -600,7 +600,7 @@ def print_check_report(cfg: LauncherConfig, problems: list) -> None:
     print("")
     print("-" * 68)
     print("环境检查（--check，仅检查不写任何文件）：")
-    print("  产品入口        : %s" % ("通过" if (cfg.project_root / "main.py").is_file() else "缺失"))
+    print("  产品入口        : %s" % ("通过" if (cfg.project_root / "src" / "main.py").is_file() else "缺失"))
     print("  产品版本        : v%s（读取 src/config.py）" % version)
     print("  Pillow          : %s" % ("通过 v%s" % pill["version"] if pill["ok"] else "缺失（%s）" % pill["error"]))
     print("  csc.exe         : %s" % (csc if csc else "缺失"))
@@ -1019,7 +1019,7 @@ def execute_build(cfg: LauncherConfig) -> int:
         if not state.verify["ok"]:
             raise BuildError(
                 "exe 自检未通过：%s" % state.verify["detail"],
-                "exe 已生成但 --version 自检失败，请检查解释器布局（runtime 目录）与 main.py",
+                "exe 已生成但 --version 自检失败，请检查解释器布局（runtime 目录）与 src/main.py",
             )
     print_step(6, total, "自检 exe --version", time.perf_counter() - step_start, "完成")
 

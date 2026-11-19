@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""T1 地基冒烟测试：契约模块导入 + SQLite 建表 + run.bat 编码规范。
+"""T1 地基冒烟测试：契约模块导入 + SQLite 建表 + bat/run.bat 编码规范。
 
 可直接 pytest 运行，也可单独运行：python tests/test_skeleton.py
 """
@@ -85,9 +85,9 @@ def test_ban_dedup_key(tmp_path):
 
 
 def test_run_bat_encoding():
-    """run.bat 必须全 ASCII、CRLF 行尾、用 %~dp0 相对定位 runtime。"""
-    bat_path = PROJECT_ROOT / "run.bat"
-    assert bat_path.is_file(), "缺少 run.bat"
+    """bat/run.bat 必须全 ASCII、CRLF 行尾、用 %~dp0 相对定位 runtime。"""
+    bat_path = PROJECT_ROOT / "bat" / "run.bat"
+    assert bat_path.is_file(), "缺少 bat/run.bat"
     raw = bat_path.read_bytes()
     raw.decode("ascii")  # 非 ASCII 会抛 UnicodeDecodeError
     assert b"\r\n" in raw
