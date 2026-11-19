@@ -10,7 +10,7 @@
 - **红绿方分组**：绿方 = 录像者本人所在队（由 ``ReplayDetail.recorder_dbid /
   recorder_name`` 在 players 中反查，**不写死 team==1**），绿方组在上；两组之间
   插入组头行（视图跨列合并，不参与排序）；60 人对局同样两组；
-- **默认排序（组内）**：封禁次数降序 -> 本局战力降序 -> 伤害降序（None 置后）；
+- **默认排序（组内）**：封禁次数降序 -> 本局效率降序 -> 伤害降序（None 置后）；
   表头点击只在组内改排序，组头 / 组顺序不动；
 - **本人（录像者）行高亮**：录像者身份与 ``resolve_recorder_team`` 同源
   （``ReplayDetail.recorder_dbid`` 优先、``recorder_name`` 兜底），本人行加浅蓝底
@@ -59,7 +59,7 @@ COLUMNS = [
     {"key": "duration", "title": "时长", "width": 34, "align": "center"},
     {"key": "match_type", "title": "匹配方式", "width": 56, "align": "center"},
     {"key": "vehicle", "title": "车型", "width": 66, "align": "left"},
-    {"key": "combat", "title": "本局战力", "width": 46, "align": "right"},
+    {"key": "combat", "title": "本局效率", "width": 46, "align": "right"},
     {"key": "xp", "title": "经验值", "width": 36, "align": "right"},
     {"key": "shots", "title": "射击", "width": 28, "align": "right"},
     {"key": "piercings", "title": "击穿", "width": 28, "align": "right"},
@@ -100,7 +100,7 @@ GROUP_LABELS = {
     GROUP_RED: "红方 · 敌方",
 }
 
-# 默认排序链：封禁次数降序 -> 本局战力降序 -> 伤害降序（None 置后）。
+# 默认排序链：封禁次数降序 -> 本局效率降序 -> 伤害降序（None 置后）。
 DEFAULT_SORT_CHAIN = (
     ("ban_count", False),
     ("combat", False),
@@ -125,7 +125,7 @@ def _format_number(value: Any) -> str:
 
 
 def format_combat_int(value: Any) -> str:
-    """本局战力：四舍五入取整（half-up，868.46 -> 868、216.3 -> 216）。
+    """本局效率：四舍五入取整（half-up，868.46 -> 868、216.3 -> 216）。
 
     使用 ``Decimal(str(value))`` 做十进制 half-up，避免二进制浮点在 .5 边界上的
     舍入偏差；非数字返回原值字符串，None 返回「—」。
@@ -487,7 +487,7 @@ class PlayerTableModel(QAbstractTableModel):
     def set_stats(self, state: str, stats_map: Optional[dict] = None, message: str = "") -> None:
         """设置当局战绩状态（idle / loading / ready / unavailable）与数据。
 
-        战绩异步到达后：默认排序的次级键（本局战力 / 伤害）才可用，因此未手动
+        战绩异步到达后：默认排序的次级键（本局效率 / 伤害）才可用，因此未手动
         排序时重建一次让默认排序生效；手动排序时仅刷新显示值。
         """
         self._stats_state = state
@@ -518,7 +518,7 @@ class PlayerTableModel(QAbstractTableModel):
         self._rebuild()
 
     def reset_sort(self) -> None:
-        """恢复默认排序（封禁次数降序 -> 本局战力降序 -> 伤害降序）。"""
+        """恢复默认排序（封禁次数降序 -> 本局效率降序 -> 伤害降序）。"""
         self._sort_chain = tuple(DEFAULT_SORT_CHAIN)
         self._user_sorted = False
         self._rebuild()
@@ -783,7 +783,7 @@ def main(argv: list) -> int:
     stats_map = {("id", item.dbid): item for item in stats.players}
     model.set_stats(STATS_STATE_READY, stats_map)
     combat_column = COLUMN_INDEX["combat"]
-    print("[3/4] 本局战力取整示例：%s（原值 %s）"
+    print("[3/4] 本局效率取整示例：%s（原值 %s）"
           % (model.data(model.index(model.first_player_row(), combat_column),
                         Qt.ItemDataRole.DisplayRole if Qt else 0),
              getattr(stats.players[0], "combat", None)))

@@ -7,9 +7,9 @@
 - 业务门面：数据状态口径（去重入库 322,806 / 官方源 322,941）、mock 全流程、真实库读取；
 - **第一轮界面契约**（task-3）：
   1) 列顺序 / 标题逐字（24 列，删「命中率」「阵营」）；
-  2) 本局战力四舍五入取整（half-up）；
+  2) 本局效率四舍五入取整（half-up）；
   3) 红绿方上下分组（绿方 = 录像者本人所在队，不写死 team==1）、组头行跨列合并且不参与排序；
-  4) 组内默认排序：封禁次数降序 -> 本局战力降序 -> 伤害降序（None 置后），表头点击只在组内改排序；
+  4) 组内默认排序：封禁次数降序 -> 本局效率降序 -> 伤害降序（None 置后），表头点击只在组内改排序；
   5) 「查询结果」标题行胜负平 + 比分（含 partial 局异步到达）；
   6) 1920×1080 下 30 人（+2 组头）无垂直滚动条；60 人保留滚动条、视口约 30 名玩家；
   7) 明细面板当局战绩新字段（坦克车名 / 阵营按本人队）+ 综合战绩缓存展示；
@@ -50,7 +50,7 @@ from src.store import db  # noqa: E402
 # 列契约（顺序固定、标题逐字；task-3 / 需求 2）。
 EXPECTED_COLUMN_TITLES = [
     "昵称", "账号 ID", "军团缩写", "封禁次数", "最近封禁日期", "原因", "时长", "匹配方式",
-    "车型", "本局战力", "经验值", "射击", "击穿", "造成伤害", "被击中", "受到的潜在伤害",
+    "车型", "本局效率", "经验值", "射击", "击穿", "造成伤害", "被击中", "受到的潜在伤害",
     "装甲抵消伤害", "发现敌人", "击伤敌方战车", "击毁敌方战车", "协助盟友造成伤害",
     "占领敌方基地点数", "保卫基地防御点数", "行驶里程",
 ]
@@ -325,7 +325,7 @@ def test_real_data_status_with_temp_db(tmp_path):
 
 # ---------------------------------------------------------------- 列契约 / 取整
 def test_result_columns_contract(qapp):
-    """列顺序与标题逐字契约：24 列、删「命中率」「阵营」、车型在本局战力前。"""
+    """列顺序与标题逐字契约：24 列、删「命中率」「阵营」、车型在本局效率前。"""
     from src.ui.table_model import COLUMNS, COLUMN_INDEX
 
     titles = [column["title"] for column in COLUMNS]
@@ -333,8 +333,8 @@ def test_result_columns_contract(qapp):
     assert len(COLUMNS) == 24
     assert "命中率" not in titles
     assert "阵营" not in titles
-    # 车型列紧跟匹配方式、在本局战力之前（需求 3）。
-    assert titles.index("车型") + 1 == titles.index("本局战力")
+    # 车型列紧跟匹配方式、在本局效率之前（需求 3）。
+    assert titles.index("车型") + 1 == titles.index("本局效率")
     # 表头取模型 headerData（视图展示值）。
     model = _make_model()
     headers = [model.headerData(index, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole)
@@ -350,7 +350,7 @@ def _make_model():
 
 
 def test_combat_rounding_half_up(qapp):
-    """本局战力四舍五入取整（half-up）：868.46->868、216.3->216、216.5->217、868.5->869。"""
+    """本局效率四舍五入取整（half-up）：868.46->868、216.3->216、216.5->217、868.5->869。"""
     from src.ui.table_model import COLUMN_INDEX, STATS_STATE_READY
 
     detail, matches = make_synthetic_replay(player_count=6)
@@ -452,15 +452,15 @@ def test_group_headers_span_all_columns(qapp):
 
 
 def test_default_sort_ban_combat_damage(qapp):
-    """组内默认排序：封禁次数降序 -> 本局战力降序 -> 伤害降序（None 置后）。"""
+    """组内默认排序：封禁次数降序 -> 本局效率降序 -> 伤害降序（None 置后）。"""
     from src.ui.table_model import STATS_STATE_READY
 
     detail, matches = make_synthetic_replay(player_count=30, recorder_index=0)  # 绿方 = team 1
     # 绿方组（team 1）内构造排序用例；其余玩家 ban=0 且无战绩，排在后面。
     spec = {
-        "测试玩家00": (2, 100.0, 500),   # 次数 2 / 战力 100 / 伤害 500
-        "测试玩家01": (2, 200.0, 100),   # 次数 2 / 战力 200 / 伤害 100
-        "测试玩家02": (2, 200.0, 300),   # 次数 2 / 战力 200 / 伤害 300 -> 应排第一
+        "测试玩家00": (2, 100.0, 500),   # 次数 2 / 效率 100 / 伤害 500
+        "测试玩家01": (2, 200.0, 100),   # 次数 2 / 效率 200 / 伤害 100
+        "测试玩家02": (2, 200.0, 300),   # 次数 2 / 效率 200 / 伤害 300 -> 应排第一
         "测试玩家03": (1, 999.0, 999),   # 次数 1 -> 排 2 次之后
         "测试玩家04": (0, None, None),   # 无战绩 -> None 置后
     }
@@ -484,7 +484,7 @@ def test_default_sort_ban_combat_damage(qapp):
     model.set_stats(STATS_STATE_READY, stats_map)
     groups = rows_grouped_by_team(model)
     green = [player.nickname for player in groups[0]["players"]]
-    # 前 5 名 = 构造用例的期望顺序（次数降序 -> 战力降序 -> 伤害降序）。
+    # 前 5 名 = 构造用例的期望顺序（次数降序 -> 效率降序 -> 伤害降序）。
     assert green[:5] == ["测试玩家02", "测试玩家01", "测试玩家00", "测试玩家03", "测试玩家04"]
     # 表头点击只在组内改排序：按昵称升序后组顺序 / 组头不动。
     from src.ui.table_model import COLUMN_INDEX
@@ -494,7 +494,7 @@ def test_default_sort_ban_combat_damage(qapp):
     assert groups_sorted[1]["label"].startswith("红方")
     names = [player.nickname for player in groups_sorted[0]["players"]]
     assert names == sorted(names, key=str.lower)
-    # 恢复默认排序后回到 次数/战力/伤害 顺序。
+    # 恢复默认排序后回到 次数/效率/伤害 顺序。
     model.reset_sort()
     assert [player.nickname for player in rows_grouped_by_team(model)[0]["players"]][:5] == green[:5]
 
@@ -1291,12 +1291,12 @@ def test_application_version_from_config(qapp):
 
 
 def test_round3_final_ui_trim(qapp):
-    """第三轮 1.0 定稿：「最近 7 天」「数据状态」按钮移除，扫描入口 3 个，版本 1.0.1。"""
+    """第三轮 1.0 定稿：「最近 7 天」「数据状态」按钮移除，扫描入口 3 个，版本 1.0.2。"""
     from src.ui.main_window import SCAN_MODE_LABELS, MainWindow
     from src.ui.widgets import DataStatusDialog
 
-    # 1) 版本号定稿 1.0.1（配置唯一真源；1.0.0 起的定稿版本串）
-    assert load_config().app_version == "1.0.1"
+    # 1) 版本号 1.0.2（配置唯一真源；1.0.0 起的定稿版本串）
+    assert load_config().app_version == "1.0.2"
 
     service = make_mock_service()
     window = MainWindow(service)
@@ -1304,11 +1304,11 @@ def test_round3_final_ui_trim(qapp):
     window.show()
     try:
         settle(qapp)
-        # 2) 窗口标题与顶栏版本标签显示 v1.0.1
-        assert window.windowTitle().endswith("v1.0.1"), window.windowTitle()
+        # 2) 窗口标题与顶栏版本标签显示 v1.0.2
+        assert window.windowTitle().endswith("v1.0.2"), window.windowTitle()
         version_labels = [label.text() for label in window.findChildren(QLabel)
                           if label.objectName() == "SubTitle"]
-        assert version_labels == ["v1.0.1"], version_labels
+        assert version_labels == ["v1.0.2"], version_labels
 
         # 3) 两个按钮彻底移除：属性不存在，且全窗口按钮文案里也不存在
         assert not hasattr(window, "scan_recent_button")
@@ -1368,6 +1368,9 @@ def test_auto_start_scans_all_replays_and_selects_newest(qapp, monkeypatch):
         scan_modes = []
         monkeypatch.setattr(window, "start_scan",
                             lambda mode="latest": scan_modes.append(mode))
+        # P0 修复后 _on_scan_finished 会调度启动名单检查；这里拦截，避免本用例引入后台更新。
+        monkeypatch.setattr(window, "_start_update_check",
+                            lambda *args, **kwargs: None)
         # 启动自动动作：扫描全部录像
         window.auto_start()
         assert scan_modes == ["all"], scan_modes
@@ -1413,9 +1416,17 @@ def test_auto_start_real_mode_with_fake_scan(qapp, monkeypatch, tmp_path):
         service, "get_battle_stats",
         lambda detail: BattleStatsResult(available=False, message="测试：跳过战绩请求"),
     )
+    # P0 修复后启动检查在扫描结束后触发：测试里用假更新拦截官方请求（不发真实网络）。
+    monkeypatch.setattr(
+        service, "update_ban_list",
+        lambda force=False, progress_cb=None, cancel_cb=None: models.UpdateResult(
+            ok=True, message="测试：跳过官方更新"),
+    )
     window = MainWindow(service)
     window.show()
     qapp.processEvents()
+    # 本用例验证老用户自动流程；空库首启会走首次使用弹窗流程，这里显式跳过。
+    monkeypatch.setattr(window, "_first_run_flow_state", lambda: {"active": False})
     window.auto_start()
     # 正确等待方式：processEvents + sleep（不能用 QTest.qWait 高频轮询）
     assert wait_until(qapp, lambda: window.model.player_row_count() > 0, timeout_s=15), "auto_start 未出结果"
@@ -1428,6 +1439,178 @@ def test_auto_start_real_mode_with_fake_scan(qapp, monkeypatch, tmp_path):
     assert window.model.player_row_count() == rows_first
     window.close()
     service.dispose()
+
+
+# ---------------------------------------------------------------- P0：启动名单检查改为「扫描完成后触发」
+def test_auto_start_does_not_schedule_update_before_scan_finishes(qapp, monkeypatch):
+    """P0 回归：auto_start 不再用固定 15s 定时器；扫描结束前不调度名单更新。"""
+    from src.app import mock_data
+    from src.ui.main_window import MainWindow
+
+    service = make_mock_service()
+    window = MainWindow(service)
+    window.show()
+    qapp.processEvents()
+    if window._update_timer is not None:
+        window._update_timer.stop()
+    calls = []
+    monkeypatch.setattr(window, "start_scan", lambda mode="latest": None)
+    monkeypatch.setattr(
+        window, "_start_update_check",
+        lambda silent=False, force=True, _retry=0: calls.append((silent, force)))
+    try:
+        window.auto_start()
+        settle(qapp)
+        assert calls == [], "auto_start 不应立即调度名单更新（必须等扫描结束）"
+        assert window._startup_update_pending is True
+        assert window._startup_update_done is False
+        # 扫描完成后才调度一次（silent=True, force=False）
+        window._on_scan_finished("all", mock_data.build_replays())
+        settle(qapp)
+        assert calls == [(True, False)], calls
+        assert window._startup_update_done is True
+        # 再次扫描结束不会重复调度（不与 6h 定时器重复）
+        window._on_scan_finished("all", mock_data.build_replays())
+        settle(qapp)
+        assert calls == [(True, False)], calls
+    finally:
+        window.close()
+        service.dispose()
+
+
+def test_auto_start_schedules_update_when_scan_not_started(qapp, monkeypatch):
+    """录像目录不可用（扫描未启动）时：auto_start 尾部仍触发一次名单检查。"""
+    from src.ui.main_window import MainWindow
+
+    service = make_mock_service()
+    monkeypatch.setattr(service, "replay_dir_available", lambda: False)
+    window = MainWindow(service)
+    window.show()
+    qapp.processEvents()
+    if window._update_timer is not None:
+        window._update_timer.stop()
+    calls = []
+    scan_calls = []
+    monkeypatch.setattr(window, "start_scan", lambda mode="latest": scan_calls.append(mode))
+    monkeypatch.setattr(
+        window, "_start_update_check",
+        lambda silent=False, force=True, _retry=0: calls.append((silent, force)))
+    try:
+        window.auto_start()
+        settle(qapp)
+        assert scan_calls == [], "录像目录不可用不应启动扫描"
+        assert calls == [(True, False)], calls
+        assert window._startup_update_done is True
+    finally:
+        window.close()
+        service.dispose()
+
+
+def test_scan_finish_schedules_update_after_scan_worker_released(qapp, monkeypatch):
+    """集成：mock 全量扫描结束（扫描 worker 已释放）后才触发启动名单检查。"""
+    from src.ui.main_window import MainWindow
+
+    service = make_mock_service()
+    window = MainWindow(service)
+    window.show()
+    qapp.processEvents()
+    if window._update_timer is not None:
+        window._update_timer.stop()
+    order = []
+
+    def fake_start_update(silent=False, force=True, _retry=0):
+        order.append({"silent": silent, "force": force,
+                      "scan_worker": window._scan_worker})
+
+    monkeypatch.setattr(window, "_start_update_check", fake_start_update)
+    try:
+        window.auto_start()
+        assert order == [], "扫描未结束就调度了名单更新"
+        assert wait_until(qapp, lambda: window._scan_worker is None, timeout_s=20), \
+            "扫描 worker 未释放"
+        assert wait_until(qapp, lambda: bool(order), timeout_s=10), "扫描结束后未调度名单更新"
+        assert len(order) == 1, order
+        assert order[0]["silent"] is True and order[0]["force"] is False
+        assert order[0]["scan_worker"] is None, "调度更新时扫描 worker 必须已释放"
+    finally:
+        window.close()
+        service.dispose()
+
+
+def test_update_failure_stays_visible_and_not_overwritten_by_scan(qapp, monkeypatch):
+    """更新失败信息在状态栏保留，不被扫描进度/扫描完成静默覆盖；可手动重试。"""
+    from src.ui.main_window import MainWindow
+
+    service = make_mock_service()
+    window = MainWindow(service)
+    window.show()
+    qapp.processEvents()
+    if window._update_timer is not None:
+        window._update_timer.stop()
+    try:
+        window._on_update_failed(True, "更新名单失败：官方接口请求超时（网络不可用）")
+        assert "官方接口请求超时" in window.statusBar().currentMessage()
+        assert window.update_button.isEnabled()
+        # 扫描进度 + 扫描完成（空结果）都不能覆盖失败信息
+        window._on_scan_progress(50, "正在扫描录像：5000/12851")
+        window._on_scan_finished("all", [])
+        settle(qapp)
+        assert "官方接口请求超时" in window.statusBar().currentMessage(), \
+            window.statusBar().currentMessage()
+        # 手动重试：点击「更新名单」清除失败保留标记并重新检查（假 service 不发网络）
+        monkeypatch.setattr(
+            service, "update_ban_list",
+            lambda force=False, progress_cb=None, cancel_cb=None: models.UpdateResult(
+                ok=True, message="检查完成：已是最新"))
+        # 用 silent 启动避免弹出系统消息框（首次失败弹窗由首启流程覆盖）
+        window._start_update_check(silent=True, force=True)
+        assert window._update_failure_message == ""
+        assert wait_until(qapp, lambda: window._update_worker is None, timeout_s=10)
+        assert "更新名单" in window.update_button.text() or window.update_button.isEnabled()
+    finally:
+        window.close()
+        service.dispose()
+
+
+def test_update_running_blocks_duplicate_update_and_scan(qapp, monkeypatch):
+    """更新检查进行中：重复点「更新名单」/ 启动扫描被拦截并有中文提示（防重入）。"""
+    import threading
+
+    from src.ui.main_window import MainWindow
+
+    service = make_mock_service()
+    window = MainWindow(service)
+    window.show()
+    qapp.processEvents()
+    if window._update_timer is not None:
+        window._update_timer.stop()
+    started = threading.Event()
+    release = threading.Event()
+    update_calls = []
+
+    def fake_update(force=False, progress_cb=None, cancel_cb=None):
+        update_calls.append(force)
+        started.set()
+        release.wait(5)
+        return models.UpdateResult(ok=True, message="检查完成")
+
+    monkeypatch.setattr(service, "update_ban_list", fake_update)
+    try:
+        window._start_update_check(silent=True, force=False)
+        assert started.wait(5), "更新 worker 未启动"
+        # 更新进行中：重复点「更新名单」被拦（中文提示、不产生第二次更新）
+        window._on_update_clicked()
+        assert "正在更新名单" in window.statusBar().currentMessage()
+        # 更新进行中：扫描启动被拦（不创建扫描 worker）
+        window.start_scan("all")
+        assert window._scan_worker is None
+        assert "正在更新名单" in window.statusBar().currentMessage()
+        assert update_calls == [False], update_calls
+    finally:
+        release.set()
+        assert wait_until(qapp, lambda: window._update_worker is None, timeout_s=10)
+        window.close()
+        service.dispose()
 
 
 def test_main_window_update_failure_is_chinese(qapp):
@@ -1482,3 +1665,500 @@ def test_scrollable_combo_popup_15_rows_with_scrollbar(qapp):
     qapp.processEvents()
     assert not popup.isVisible()
     combo.close()
+
+
+# ---------------------------------------------------------------- P0：首次使用双弹窗确认流程（task-20）
+# 用户拍板：空名单库首启**不自动扫描**，先弹软件内自绘弹窗①（开始扫描录像）；
+# 扫描结束后弹窗②（开始更新名单）；成功且 bans>0 才写 meta.first_run_flow_done=true；
+# 二次启动不再弹窗、走「自动扫描 + 扫描结束后串行更新检查」；老用户不弹窗。
+# 坑：真实模式空库用例必须 monkeypatch `_ask_first_run_*` / `start_scan` / `_start_update_check`，
+# 否则会真的弹模态对话框挂起测试，或真的发起扫描/官方请求（禁止）。
+FIRST_RUN_FLOW_META_KEY = "first_run_flow_done"
+
+
+def make_fake_environment():
+    """构造假环境探测结果（测试不真的扫注册表/磁盘/录像目录）。"""
+    from src.app.service import EnvironmentInfo
+
+    return EnvironmentInfo(
+        game_dir="X:/FakeGame",
+        replay_dir="X:/FakeGame/replays",
+        account_id=7048141181,
+        account_name="kingbob_",
+        game_dir_source="registry",
+        account_source="replay_meta",
+        detected=True,
+        message="测试：假环境",
+    )
+
+
+def make_first_run_window(qapp, service, monkeypatch):
+    """构造真实模式主窗口（假环境探测 + 录像目录可用），停掉 6h 更新定时器。"""
+    from src.ui.main_window import MainWindow
+
+    monkeypatch.setattr(service, "detect_environment", lambda **kwargs: make_fake_environment())
+    monkeypatch.setattr(service, "replay_dir_available", lambda: True)
+    window = MainWindow(service)
+    window.resize(TARGET_WINDOW_WIDTH, TARGET_WINDOW_HEIGHT)
+    window.show()
+    qapp.processEvents()
+    if window._update_timer is not None:
+        window._update_timer.stop()
+    return window
+
+
+def test_first_run_empty_library_waits_for_scan_confirmation(qapp, monkeypatch, tmp_path):
+    """空库首启：auto_start 不自动扫描，先弹弹窗①；拒绝时不产生扫描/更新（下次再提示）。"""
+    service = make_real_service(tmp_path / "first-run-empty.db")
+    window = make_first_run_window(qapp, service, monkeypatch)
+    scan_modes, scan_asks, update_asks, update_calls = [], [], [], []
+
+    def fake_scan(mode="latest"):
+        scan_modes.append(mode)
+
+    def fake_ask_scan():
+        scan_asks.append(True)
+        return False
+
+    def fake_ask_update(error_message=""):
+        update_asks.append(error_message)
+        return False
+
+    def fake_start_update(silent=False, force=True, _retry=0):
+        update_calls.append((silent, force))
+
+    monkeypatch.setattr(window, "start_scan", fake_scan)
+    monkeypatch.setattr(window, "_ask_first_run_scan", fake_ask_scan)
+    monkeypatch.setattr(window, "_ask_first_run_update", fake_ask_update)
+    monkeypatch.setattr(window, "_start_update_check", fake_start_update)
+    try:
+        flow = window._first_run_flow_state()
+        assert flow == {"active": True, "need_scan": True, "need_update": False}, flow
+        window.auto_start()
+        settle(qapp)
+        assert scan_asks == [True], "空库首启必须先弹窗①询问是否扫描"
+        assert scan_modes == [], "用户确认前不得自动扫描（P0：避免与名单更新并发写库）"
+        assert update_asks == [], "扫描结束前不得弹窗②/启动名单更新"
+        assert update_calls == [], "首启流程不得自动启动名单更新"
+        assert window._first_run_flow_active is False
+        assert window._startup_update_pending is False
+        assert "已跳过扫描" in window.progress_label.text(), window.progress_label.text()
+    finally:
+        window.close()
+        service.dispose()
+
+
+def test_first_run_confirm_scan_then_update_dialog(qapp, monkeypatch, tmp_path):
+    """空库首启：确认弹窗①后 start_scan("all")；扫描结束才弹窗②，确认后才启动更新。"""
+    service = make_real_service(tmp_path / "first-run-scan.db")
+    window = make_first_run_window(qapp, service, monkeypatch)
+    scan_modes, scan_asks, update_asks, update_calls = [], [], [], []
+
+    def fake_scan(mode="latest"):
+        scan_modes.append(mode)
+
+    def fake_ask_scan():
+        scan_asks.append(True)
+        return True
+
+    def fake_ask_update(error_message=""):
+        update_asks.append(error_message)
+        return True
+
+    def fake_start_update(silent=False, force=True, _retry=0):
+        update_calls.append((silent, force))
+
+    monkeypatch.setattr(window, "start_scan", fake_scan)
+    monkeypatch.setattr(window, "_ask_first_run_scan", fake_ask_scan)
+    monkeypatch.setattr(window, "_ask_first_run_update", fake_ask_update)
+    monkeypatch.setattr(window, "_start_update_check", fake_start_update)
+    try:
+        window.auto_start()
+        settle(qapp)
+        assert scan_asks == [True]
+        assert scan_modes == ["all"], "确认弹窗①后应扫描全部录像（mode='all'，非 latest）"
+        assert update_asks == [], "扫描结束前不得弹窗②"
+        assert update_calls == []
+        assert window._first_run_flow_active is True
+        assert window._scan_worker is None  # start_scan 已被拦截，不产生真实扫描线程
+        # 模拟扫描结束（空结果也走同一结束入口）：出现弹窗②，确认后才启动更新。
+        window._on_scan_finished("all", [])
+        settle(qapp)
+        assert update_asks == [""], "扫描完成后应弹窗②（首次提示无失败原因）"
+        assert update_calls == [(True, True)], \
+            "确认弹窗②后才启动强制更新，且 silent=True（不得弹系统消息框）"
+        assert window._first_run_flow_active is False
+        assert window._first_run_update_active is True
+        assert "正在下载官方封禁名单" in window.progress_label.text(), window.progress_label.text()
+    finally:
+        window.close()
+        service.dispose()
+
+
+def test_first_run_update_failure_visible_and_retryable(qapp, monkeypatch, tmp_path):
+    """首启更新失败：失败原因进自绘弹窗 + 状态栏保留，可重试；不静默、不弹系统框。"""
+    service = make_real_service(tmp_path / "first-run-fail.db")
+    window = make_first_run_window(qapp, service, monkeypatch)
+    update_asks, update_calls = [], []
+    ask_returns = []
+
+    def fake_ask_update(error_message=""):
+        update_asks.append(error_message)
+        return ask_returns.pop(0) if ask_returns else False
+
+    def fake_start_update(silent=False, force=True, _retry=0):
+        update_calls.append((silent, force))
+
+    monkeypatch.setattr(window, "_ask_first_run_update", fake_ask_update)
+    monkeypatch.setattr(window, "_start_update_check", fake_start_update)
+    failure = "更新名单失败：官方接口请求超时（网络不可用）"
+    try:
+        # 1) worker 抛错路径：失败原因必须出现在弹窗②的重试文案里 + 状态栏保留
+        window._first_run_update_active = True
+        window._on_update_failed(True, failure)
+        settle(qapp)
+        assert update_asks == [failure], "首启更新失败必须在软件内弹窗中显示失败原因"
+        assert window._update_failure_message and "官方接口请求超时" in window._update_failure_message
+        assert failure in window.statusBar().currentMessage(), "状态栏须保留失败信息"
+        assert window._update_failure_visible() is True
+        assert window.update_button.isEnabled(), "失败后必须允许用户重试"
+        assert window._first_run_update_active is False
+        # 2) 用户在失败弹窗里点「重试」：再次启动 silent 强制更新
+        ask_returns.append(True)
+        window._show_first_run_update_dialog(error_message=failure)
+        assert update_asks == [failure, failure], update_asks
+        assert update_calls == [(True, True)], update_calls
+        assert window._first_run_update_active is True
+        # 3) 更新返回 ok=False：同样弹失败/重试弹窗（silent 不弹系统消息框）
+        ask_returns.append(False)
+        window._first_run_update_active = True
+        window._on_update_finished(
+            True, models.UpdateResult(ok=False, message="官方接口返回 403 风控"))
+        settle(qapp)
+        assert update_asks[-1] == "官方接口返回 403 风控", update_asks
+        assert "403" in window.statusBar().currentMessage(), window.statusBar().currentMessage()
+    finally:
+        window.close()
+        service.dispose()
+
+
+def test_first_run_update_success_persists_meta_and_second_start_autoscans(qapp, monkeypatch, tmp_path):
+    """首启更新成功 → 持久化 meta.first_run_flow_done；二次启动不弹窗、自动扫描 + 扫描后串行检查。"""
+    service = make_real_service(tmp_path / "first-run-done.db")
+    window = make_first_run_window(qapp, service, monkeypatch)
+    # 更新完成后名单库非空（真实官方下载不在测试里跑，按条数>0 模拟）。
+    monkeypatch.setattr(window, "_record_count", lambda: 5)
+    scan_modes, update_asks, update_calls = [], [], []
+
+    def fake_scan(mode="latest"):
+        scan_modes.append(mode)
+
+    def fake_ask_update(error_message=""):
+        update_asks.append(error_message)
+        return True
+
+    def fake_start_update(silent=False, force=True, _retry=0):
+        update_calls.append((silent, force))
+
+    monkeypatch.setattr(window, "start_scan", fake_scan)
+    monkeypatch.setattr(window, "_ask_first_run_scan", lambda: True)
+    monkeypatch.setattr(window, "_ask_first_run_update", fake_ask_update)
+    monkeypatch.setattr(window, "_start_update_check", fake_start_update)
+    second = None
+    try:
+        # 完整首启链路：弹窗①确认 → 扫描（假）→ 弹窗②确认 → 更新成功
+        window.auto_start()
+        settle(qapp)
+        assert scan_modes == ["all"] and window._first_run_flow_active is True
+        window._on_scan_finished("all", [])
+        settle(qapp)
+        assert update_asks == [""] and update_calls == [(True, True)]
+        assert window._first_run_update_active is True
+        window._on_update_finished(
+            True, models.UpdateResult(ok=True, message="更新完成：新增 1 批"))
+        settle(qapp)
+        # 1) meta 持久化（内存 + 新连接读回，证明不是仅内存态）
+        assert window._meta_get(FIRST_RUN_FLOW_META_KEY) is True
+        conn = db.connect(service.cfg.db_path)
+        try:
+            assert db.get_meta(conn, FIRST_RUN_FLOW_META_KEY) is True
+        finally:
+            conn.close()
+        assert window._first_run_update_active is False
+        assert "首次使用完成" in window.statusBar().currentMessage(), \
+            window.statusBar().currentMessage()
+
+        # 2) 第二次启动（新窗口、同一 DB）：不再弹窗，自动扫描全部录像；
+        #    扫描结束后才串行触发一次启动名单检查（P0 防御：不当场并发检查）。
+        second = make_first_run_window(qapp, service, monkeypatch)
+        second_scan, second_asks = [], []
+        second_update_calls = []
+
+        def second_fake_scan(mode="latest"):
+            second_scan.append(mode)
+
+        def second_fake_ask(name):
+            def _ask(*args, **kwargs):
+                second_asks.append(name)
+                return False
+            return _ask
+
+        def second_fake_start_update(silent=False, force=True, _retry=0):
+            second_update_calls.append((silent, force))
+
+        monkeypatch.setattr(second, "start_scan", second_fake_scan)
+        monkeypatch.setattr(second, "_ask_first_run_scan", second_fake_ask("scan"))
+        monkeypatch.setattr(second, "_ask_first_run_update", second_fake_ask("update"))
+        monkeypatch.setattr(second, "_start_update_check", second_fake_start_update)
+        assert second._first_run_flow_state() == {"active": False}
+        second.auto_start()
+        settle(qapp)
+        assert second_asks == [], "首启已完成：二次启动不得再弹窗"
+        assert second_scan == ["all"], "二次启动应自动扫描全部录像"
+        assert second_update_calls == [], "扫描结束前不得启动名单检查"
+        second._on_scan_finished("all", [])
+        assert wait_until(qapp, lambda: bool(second_update_calls), timeout_s=10), \
+            "扫描结束后未串行触发启动名单检查"
+        assert second_update_calls == [(True, False)], second_update_calls
+        assert second._startup_update_done is True
+    finally:
+        if second is not None:
+            second.close()
+        window.close()
+        service.dispose()
+
+
+def test_first_run_skipped_for_old_user_with_bans(qapp, monkeypatch, tmp_path):
+    """老用户（名单库已有 bans）：不弹首启弹窗，直接自动扫描 + 扫描结束后串行更新检查。"""
+    db_path = tmp_path / "first-run-old.db"
+    conn = db.connect(db_path)
+    conn.execute(
+        "INSERT INTO bans(batch_day, source_type, nickname, reason, duration, ban_times) "
+        "VALUES(?, 'csv', ?, '违规使用脚本', '永久', 1)",
+        ("2026-11-06", "老用户测试"),
+    )
+    conn.commit()
+    conn.close()
+    service = make_real_service(db_path)
+    window = make_first_run_window(qapp, service, monkeypatch)
+    scan_modes, asks, update_calls = [], [], []
+
+    def fake_scan(mode="latest"):
+        scan_modes.append(mode)
+
+    def fake_ask_scan():
+        asks.append("scan")
+        return False
+
+    def fake_ask_update(error_message=""):
+        asks.append("update")
+        return False
+
+    def fake_start_update(silent=False, force=True, _retry=0):
+        update_calls.append((silent, force))
+
+    monkeypatch.setattr(window, "start_scan", fake_scan)
+    monkeypatch.setattr(window, "_ask_first_run_scan", fake_ask_scan)
+    monkeypatch.setattr(window, "_ask_first_run_update", fake_ask_update)
+    monkeypatch.setattr(window, "_start_update_check", fake_start_update)
+    try:
+        assert window._data_status.record_count > 0
+        assert window._first_run_flow_state() == {"active": False}
+        window.auto_start()
+        settle(qapp)
+        assert asks == [], "已有名单数据的老用户不得弹任何首启弹窗"
+        assert scan_modes == ["all"], "老用户保持自动扫描全部录像"
+        assert update_calls == [], "扫描结束前不得启动名单检查"
+        window._on_scan_finished("all", [])
+        assert wait_until(qapp, lambda: bool(update_calls), timeout_s=10), "扫描结束后未触发名单检查"
+        assert update_calls == [(True, False)], update_calls
+    finally:
+        window.close()
+        service.dispose()
+
+
+def test_first_run_existing_replay_index_skips_scan_dialog(qapp, monkeypatch, tmp_path):
+    """上次已扫描出录像索引但名单仍空：跳过弹窗①，直接弹窗②下载官方名单。"""
+    from src.app.service import DataStatus
+
+    service = make_real_service(tmp_path / "first-run-index.db")
+    window = make_first_run_window(qapp, service, monkeypatch)
+    monkeypatch.setattr(
+        window, "_safe_data_status",
+        lambda: DataStatus(available=True, record_count=0, replay_index_count=12851),
+    )
+    scan_modes, asks, update_calls = [], [], []
+
+    def fake_scan(mode="latest"):
+        scan_modes.append(mode)
+
+    def fake_ask_scan():
+        asks.append("scan")
+        return False
+
+    def fake_ask_update(error_message=""):
+        asks.append("update")
+        return True
+
+    def fake_start_update(silent=False, force=True, _retry=0):
+        update_calls.append((silent, force))
+
+    monkeypatch.setattr(window, "start_scan", fake_scan)
+    monkeypatch.setattr(window, "_ask_first_run_scan", fake_ask_scan)
+    monkeypatch.setattr(window, "_ask_first_run_update", fake_ask_update)
+    monkeypatch.setattr(window, "_start_update_check", fake_start_update)
+    try:
+        flow = window._first_run_flow_state()
+        assert flow == {"active": True, "need_scan": False, "need_update": True}, flow
+        window.auto_start()
+        settle(qapp)
+        assert asks == ["update"], "已有录像索引时不应再问扫描，直接弹窗②"
+        assert scan_modes == [], "已有录像索引时不得重复扫描"
+        assert update_calls == [(True, True)], update_calls
+    finally:
+        window.close()
+        service.dispose()
+
+
+def test_first_run_dialogs_are_in_app_qdialogs_without_beep_or_system_box(qapp):
+    """首启双弹窗 = 软件内自绘 QDialog；无 QApplication.beep 调用、无系统消息框。"""
+    import ast
+    import inspect
+
+    from PySide6.QtWidgets import QDialog
+
+    from src.ui import main_window as main_window_module
+    from src.ui import widgets as widgets_module
+
+    scan_dialog = widgets_module.FirstRunScanDialog()
+    update_dialog = widgets_module.FirstRunUpdateDialog()
+    retry_dialog = None
+    try:
+        # 1) 是软件内自绘 QDialog（不是 QMessageBox / 系统弹窗），模态且标题为中文
+        for dialog in (scan_dialog, update_dialog):
+            assert isinstance(dialog, QDialog), type(dialog)
+            assert dialog.isModal(), "首启弹窗必须模态"
+            assert dialog.windowTitle().startswith("首次使用"), dialog.windowTitle()
+        assert scan_dialog.primary_button.text() == "开始扫描录像"
+        assert update_dialog.primary_button.text() == "开始更新名单"
+        assert scan_dialog.consent_label is not None
+        assert "同意" in scan_dialog.consent_label.text(), scan_dialog.consent_label.text()
+        # 2) 更新失败原因显示在自绘弹窗内（可重试；不依赖系统消息框/提示音）
+        retry_dialog = widgets_module.FirstRunUpdateDialog(error_message="官方接口请求超时")
+        assert not retry_dialog.error_label.isHidden(), "失败原因应显示在自绘弹窗内"
+        assert "官方接口请求超时" in retry_dialog.error_label.text()
+    finally:
+        for dialog in (retry_dialog, scan_dialog, update_dialog):
+            if dialog is not None:
+                dialog.close()
+
+    def ast_uses(source, name):
+        import textwrap
+
+        # inspect.getsource(方法) 带缩进：先 dedent 再 parse，否则 IndentationError。
+        for node in ast.walk(ast.parse(textwrap.dedent(source))):
+            if isinstance(node, ast.Name) and node.id == name:
+                return True
+            if isinstance(node, ast.Attribute) and node.attr == name:
+                return True
+        return False
+
+    # 3) 首启弹窗类与询问方法源码里没有 QMessageBox / beep
+    for obj in (widgets_module._FirstRunDialogBase,
+                widgets_module.FirstRunScanDialog,
+                widgets_module.FirstRunUpdateDialog):
+        source = inspect.getsource(obj)
+        assert not ast_uses(source, "QMessageBox"), obj.__name__
+        assert not ast_uses(source, "beep"), obj.__name__
+    for method in (main_window_module.MainWindow._ask_first_run_scan,
+                   main_window_module.MainWindow._ask_first_run_update):
+        source = inspect.getsource(method)
+        assert not ast_uses(source, "QMessageBox"), method.__name__
+        assert not ast_uses(source, "beep"), method.__name__
+    # 4) 全 src/ui 无 QApplication.beep() 调用（无提示音；grep 仅剩注释/docstring 说明）
+    ui_dir = PROJECT_ROOT / "src" / "ui"
+    for path in sorted(ui_dir.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        beep_calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "beep"
+        ]
+        assert not beep_calls, "%s 含 QApplication.beep 调用（违反无提示音要求）" % path.name
+
+
+# ---------------------------------------------------------------- 显示文案：「战力」→「效率」（task-25）
+def test_user_visible_wording_uses_efficiency_not_combat_power(qapp):
+    """用户口径：界面显示「效率」不再显示「战力」；内部字段/排序键保持不变。
+
+    老玩家习惯叫「盒子效率」，没人说「战力」——只改显示文案：列标题、明细面板字段标签、
+    综合战绩字段、底部默认排序提示；内部 ``combat`` / ``combat_power`` 字段名与排序键不动。
+    """
+    from src.ui.table_model import COLUMN_INDEX, COLUMNS, DEFAULT_SORT_CHAIN
+    from src.ui.widgets import BATTLE_FIELDS, PlayerDetailPanel
+
+    # 1) 24 列表头逐字：本局效率在、本局战力不在；内部 key 仍是 combat
+    titles = [column["title"] for column in COLUMNS]
+    assert titles[COLUMN_INDEX["combat"]] == "本局效率"
+    assert "本局战力" not in titles
+    assert all("战力" not in title for title in titles), titles
+    # 2) 内部字段名 / 排序键保持不变（只改显示文案）
+    assert COLUMN_INDEX["combat"] == 9
+    assert ("combat", False) in DEFAULT_SORT_CHAIN
+    # 3) 明细面板「当局战绩」字段标签 + 「综合战绩」字段标签
+    battle_labels = dict(BATTLE_FIELDS)
+    assert battle_labels["combat"] == "本局效率"
+    assert all("战力" not in label for label in battle_labels.values())
+    panel = PlayerDetailPanel()
+    try:
+        labels = [label.text() for label in panel.findChildren(QLabel)]
+        assert "本局效率" in labels, labels
+        assert "效率" in labels, labels
+        assert not [text for text in labels if "战力" in text], labels
+    finally:
+        panel.close()
+    # 4) 底部汇总（用户可见）的默认排序提示改为「本局效率降序」
+    window = make_window()
+    try:
+        window._query_result = SimpleNamespace(
+            summary={"total": 30, "hits": 6, "id_hits": 3, "nickname_hits": 3,
+                     "yellow": 2, "red": 1},
+            is_partial=False,
+        )
+        window._refresh_summary()
+        summary = window.summary_label.text()
+        assert "本局效率降序" in summary, summary
+        assert "战力" not in summary, summary
+    finally:
+        window.close()
+        window.service.dispose()
+    # 5) src/ui 用户可见源码不再出现「战力」（grep 等价断言；models/service 内部不动）
+    offenders = {}
+    for path in sorted((PROJECT_ROOT / "src" / "ui").glob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        if "战力" in text:
+            offenders[path.name] = [line.strip() for line in text.splitlines() if "战力" in line]
+    assert not offenders, "用户可见文案仍含「战力」：%r" % offenders
+
+
+def test_first_run_update_failure_dialog_no_duplicate_prefix(qapp):
+    """首启更新失败弹窗：消息已带「更新失败：/更新名单失败：」前缀时不重复加前缀。"""
+    from src.ui.widgets import FirstRunUpdateDialog
+
+    for message in ("更新失败：官方接口请求超时",
+                    "更新名单失败：官方接口请求超时"):
+        dialog = FirstRunUpdateDialog(error_message=message)
+        try:
+            text = dialog.error_label.text()
+            assert text == message, text
+            assert "更新失败：更新失败" not in text, text
+            assert "更新失败：更新名单失败" not in text, text
+        finally:
+            dialog.close()
+    # 未带前缀的服务消息仍补「更新失败：」前缀（用户能看懂失败原因）
+    dialog = FirstRunUpdateDialog(error_message="官方接口返回 403 风控")
+    try:
+        assert dialog.error_label.text() == "更新失败：官方接口返回 403 风控"
+    finally:
+        dialog.close()

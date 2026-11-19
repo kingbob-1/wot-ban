@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from functools import partial
 from pathlib import Path
 from typing import Any, Optional
@@ -48,7 +49,7 @@ try:
         QWidget,
     )
 except ImportError:  # 便于无 PySide6 环境下静态检查
-    Qt = QApplication = QMainWindow = QWidget = QFrame = object  # type: ignore[assignment]
+    Qt = QApplication = QMainWindow = QWidget = QFrame = QDialog = object  # type: ignore[assignment]
     QTimer = QUrl = QDesktopServices = QIcon = QFont = QFontMetrics = None  # type: ignore[assignment]
     QColor = QStyle = QStyleOptionViewItem = None  # type: ignore[assignment]
     QStyledItemDelegate = object  # type: ignore[assignment]
@@ -69,7 +70,13 @@ try:
         STATS_STATE_UNAVAILABLE,
         PlayerTableModel,
     )
-    from .widgets import DataStatusDialog, PlayerDetailPanel, ScrollableComboBox
+    from .widgets import (
+        DataStatusDialog,
+        FirstRunScanDialog,
+        FirstRunUpdateDialog,
+        PlayerDetailPanel,
+        ScrollableComboBox,
+    )
 except ImportError:  # 直接以脚本方式运行时的兜底
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from src.app.service import (
@@ -87,11 +94,20 @@ except ImportError:  # 直接以脚本方式运行时的兜底
         STATS_STATE_UNAVAILABLE,
         PlayerTableModel,
     )
-    from src.ui.widgets import DataStatusDialog, PlayerDetailPanel, ScrollableComboBox
+    from src.ui.widgets import (
+        DataStatusDialog,
+        FirstRunScanDialog,
+        FirstRunUpdateDialog,
+        PlayerDetailPanel,
+        ScrollableComboBox,
+    )
 
 # 1.0 定稿：录像区只保留「最新完整录像 / 全部录像 / 手动选择…」三个入口；
 # service 层 recent 能力与 config.default_scan_days 不变（仅拆掉 UI 入口）。
 SCAN_MODE_LABELS = {"latest": "最新完整录像", "all": "全部录像", "file": "手动选择"}
+
+# 首次使用流程完成标记（持久化在 data/wotban.db 的 meta 表；名单更新成功且 bans>0 后写入）。
+FIRST_RUN_FLOW_META_KEY = "first_run_flow_done"
 
 # 「查询结果」标题行：本局胜负平文案（胜绿 / 平橙 / 负红，见 theme.APP_QSS）。
 RESULT_TITLE_BASE = "查询结果"
@@ -252,6 +268,16 @@ class MainWindow(QMainWindow):
         self._environment: Any = None
         self._env_seq = 0
         self._update_timer: Any = None
+        # 启动名单检查：改为「扫描完成后触发」一次性调度（替代固定 15s 延时，
+        # 避免冷启动全量扫描（50–165s）期间并发写 SQLite 触发 database is locked）。
+        self._startup_update_pending = False
+        self._startup_update_done = False
+        # 首次使用流程：空库首启时先弹自绘弹窗①（扫描）→ 弹窗②（下载官方名单）。
+        self._first_run_flow_active = False
+        self._first_run_update_active = False
+        # 更新失败提示保留窗口（秒）：期间状态栏不被扫描/查询进度静默覆盖。
+        self._update_failure_message = ""
+        self._update_failure_until = 0.0
         self._query_seq = 0
         self._scan_mode = "latest"
         # 综合战绩：本会话内缓存（选中玩家只展示缓存，不发请求）+ 胜负平标题状态。
@@ -573,9 +599,12 @@ class MainWindow(QMainWindow):
             self._show_error("操作失败", message)
 
     def _on_worker_cancelled(self, key: int) -> None:
-        self.statusBar().showMessage("操作已取消", 5000)
+        self._show_status_message("操作已取消", 5000)
         self._set_scan_busy(False)
         self._set_query_busy(False)
+        # 启动全量扫描被取消：同样视为「扫描结束」，走首启弹窗②/启动名单检查。
+        if self._scan_worker is not None and key == id(self._scan_worker):
+            self._after_scan_completed()
 
     def _release_worker(self, key: int) -> None:
         """worker 结束：从登记表移除、清空窗口属性引用、再 deleteLater。
@@ -588,6 +617,10 @@ class MainWindow(QMainWindow):
             return
         self._clear_worker_ref(worker)
         worker.deleteLater()
+        try:
+            self._sync_action_buttons()
+        except RuntimeError:  # 窗口已销毁
+            pass
 
     def _clear_worker_ref(self, worker: Any) -> None:
         """把指向该 worker 的窗口属性统一置 None（幂等）。"""
@@ -781,35 +814,203 @@ class MainWindow(QMainWindow):
         return int(self.service.update_interval_seconds * 1000)
 
     def _on_scheduled_update(self) -> None:
-        """定时器到点：静默检查一次（force=False，不打断本地查询）。"""
+        """定时器到点：静默检查一次（force=False，不打断本地查询）。
+
+        扫描进行中不并发检查（冷启动全量扫描 12,851 个录像可能持续 50–165s，
+        并发写 SQLite 会 ``database is locked``）；本次顺延到扫描完成后。
+        """
         if self._worker_running(self._update_worker):
             return
-        self.statusBar().showMessage("已到自动检查间隔，正在后台检查名单更新…", 8000)
+        if self._worker_running(self._scan_worker):
+            self._show_status_message("正在扫描录像，名单自动检查已顺延到扫描完成后…", 8000)
+            return
+        self._show_status_message("已到自动检查间隔，正在后台检查名单更新…", 8000)
         self._start_update_check(silent=True, force=False)
 
     def trigger_scheduled_update(self) -> None:
         """手动触发一次「定时检查」逻辑（测试 / 截图脚本用）。"""
         self._on_scheduled_update()
 
+    # ------------------------------------------------------------ 启动检查（扫描后触发）
+    def _schedule_startup_update_check(self) -> None:
+        """启动后名单检查：扫描结束后统一调度一次（P0 修复，替代固定 15s 定时器）。
+
+        新用户首启冷启动全量扫描 12,851 个录像耗时 50.8–165.6s；原实现用固定
+        ``QTimer.singleShot(15000)`` 在扫描进行中触发更新检查，导致扫描线程与更新
+        线程并发写 SQLite → ``database is locked``、官方请求 0 次、名单库为空。
+        现在只在扫描 worker 结束（成功/失败/取消）后经事件循环调度一次，确保扫描
+        线程已结束、DB 不再被其占用；``_startup_update_done`` 保证仅触发一次，
+        不与 6h ``_update_timer`` 重复。
+        """
+        if not self._startup_update_pending or self._startup_update_done:
+            return
+        self._startup_update_done = True
+        if QTimer is None:
+            self._start_update_check(silent=True, force=False)
+            return
+        # singleShot(0)：等当前事件（含 worker finished / _release_worker）处理完再启动。
+        QTimer.singleShot(0, partial(self._start_update_check, True, False))
+
+    # ------------------------------------------------------------ 首次使用流程（空库首启）
+    def _safe_data_status(self) -> Any:
+        """读取名单库状态；失败返回 None（首次使用判定降级为老用户流程）。"""
+        try:
+            return self.service.get_data_status()
+        except Exception:  # noqa: BLE001 - 状态读取失败不得阻断启动
+            return None
+
+    def _meta_get(self, key: str, default: Any = None) -> Any:
+        """读取 ``data/wotban.db`` 的 meta（首次使用标记持久化用）。"""
+        try:
+            try:
+                from ..store import db as db_module
+            except ImportError:
+                from src.store import db as db_module
+            return db_module.get_meta(self.service._thread_conn(), key, default)
+        except Exception:  # noqa: BLE001 - 读取失败按未完成处理
+            return default
+
+    def _meta_set(self, key: str, value: Any) -> None:
+        """写入 ``data/wotban.db`` 的 meta（幂等；失败不阻断界面）。"""
+        try:
+            try:
+                from ..store import db as db_module
+            except ImportError:
+                from src.store import db as db_module
+            db_module.set_meta(self.service._thread_conn(), key, value)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _record_count(self) -> int:
+        """当前名单库条数（用最近一次刷新的数据状态）。"""
+        status = getattr(self, "_data_status", None)
+        return int(getattr(status, "record_count", 0) or 0)
+
+    def _first_run_flow_state(self) -> dict:
+        """首次使用流程状态。
+
+        - 老用户（已有名单数据）或首启流程已完成 → 不弹窗，走 1.0.1 自动流程；
+        - 空库且首启未完成：无录像索引 → 弹窗①（先扫描）；已有录像索引 → 直接弹窗②。
+        """
+        if getattr(self.service, "is_mock", False):
+            return {"active": False}
+        status = self._safe_data_status()
+        if status is None:
+            return {"active": False}
+        if int(getattr(status, "record_count", 0) or 0) > 0:
+            return {"active": False}
+        if bool(self._meta_get(FIRST_RUN_FLOW_META_KEY, False)):
+            return {"active": False}
+        if int(getattr(status, "replay_index_count", 0) or 0) > 0:
+            return {"active": True, "need_scan": False, "need_update": True}
+        return {"active": True, "need_scan": True, "need_update": False}
+
+    def _ask_first_run_scan(self) -> bool:
+        """弹软件内自绘弹窗①（无系统消息框/提示音）；测试可 monkeypatch。"""
+        dialog = FirstRunScanDialog(self)
+        return dialog.exec_centered() == QDialog.DialogCode.Accepted
+
+    def _ask_first_run_update(self, error_message: str = "") -> bool:
+        """弹软件内自绘弹窗②；``error_message`` 非空时显示失败原因并允许重试。"""
+        dialog = FirstRunUpdateDialog(self, error_message=error_message)
+        return dialog.exec_centered() == QDialog.DialogCode.Accepted
+
+    def _start_first_run_flow(self, flow: dict) -> None:
+        """首次使用流程：不自动扫描，先弹窗①；扫描结束后再弹窗②。"""
+        if flow.get("need_scan"):
+            self._show_empty(
+                "首次使用",
+                "首次使用需要先扫描录像并下载官方封禁名单：请按弹窗提示操作。",
+            )
+            self.progress_label.setText("首次使用：等待确认开始扫描录像…")
+            if not self.service.replay_dir_available():
+                self.progress_label.setText(
+                    "首次使用：未找到录像目录，请先点「重新检测」或「手动选择游戏目录」")
+                return
+            if self._ask_first_run_scan():
+                self._first_run_flow_active = True
+                self.progress_label.setText("首次使用：正在扫描录像（冷启动约 1–3 分钟）…")
+                self.start_scan("all")
+            else:
+                self.progress_label.setText("首次使用：已跳过扫描（下次启动会再次提示）")
+            return
+        self._show_empty(
+            "首次使用",
+            "首次使用还需要下载官方公开封禁名单：请按弹窗提示操作。",
+        )
+        self.progress_label.setText("首次使用：等待确认下载官方封禁名单…")
+        self._first_run_flow_active = False
+        self._show_first_run_update_dialog()
+
+    def _show_first_run_update_dialog(self, error_message: str = "") -> None:
+        """弹窗②：名单库仍为空时提示下载官方名单；点击后执行更新（失败可重试）。"""
+        status = self._safe_data_status()
+        if status is not None and int(getattr(status, "record_count", 0) or 0) > 0:
+            self._mark_first_run_flow_done()
+            return
+        if self._ask_first_run_update(error_message=error_message):
+            self._first_run_update_active = True
+            self.progress_label.setText(
+                "首次使用：正在下载官方封禁名单（约 5–6 分钟，只读低频）…")
+            self._start_update_check(silent=True, force=True)
+        else:
+            self._first_run_update_active = False
+            self.progress_label.setText("首次使用：已跳过名单下载（下次启动会再次提示）")
+
+    def _mark_first_run_flow_done(self) -> None:
+        """首启流程完成：持久化标记（名单更新成功且 bans>0 后写入）。"""
+        self._first_run_flow_active = False
+        self._first_run_update_active = False
+        self._meta_set(FIRST_RUN_FLOW_META_KEY, True)
+
+    def _after_scan_completed(self) -> None:
+        """扫描结束（成功/失败/取消）统一入口。
+
+        - 首启流程：不自动更新，改为弹窗②（名单库仍为空时）；
+        - 老用户：走「扫描完成后串行触发启动名单检查」（P0 防御，避免并发写库）。
+        """
+        if self._first_run_flow_active:
+            self._first_run_flow_active = False
+            self._show_first_run_update_dialog()
+            return
+        self._schedule_startup_update_check()
+
     # ------------------------------------------------------------ 更新名单
     def _on_update_clicked(self) -> None:
-        """手动「更新名单」按钮：force=True 强制检查官方接口。"""
+        """手动「更新名单」按钮：force=True 强制检查官方接口（防重入 + 中文提示）。"""
+        if self._worker_running(self._update_worker):
+            self.statusBar().showMessage("正在更新名单，请稍候…", 8000)
+            return
+        if self._worker_running(self._scan_worker):
+            self.statusBar().showMessage(
+                "正在扫描录像（冷启动可能约需 1 分钟），请等扫描完成后再更新名单", 12000)
+            return
         self._start_update_check(silent=False, force=True)
 
-    def _start_update_check(self, silent: bool = False, force: bool = True) -> None:
+    def _start_update_check(self, silent: bool = False, force: bool = True,
+                            _retry: int = 0) -> None:
         """启动名单更新检查（silent=True 时不弹结果框，仅状态栏提示）。
 
         force=False 用于启动检查与 6 小时定时检查（未到间隔则直接返回「未到检查间隔」）。
+        扫描 worker 未释放时静默顺延（每 100ms 重试，最多约 5s），保证不与扫描并发写库。
         """
         if self._worker_running(self._update_worker):
+            if not silent:
+                self.statusBar().showMessage("正在更新名单，请稍候…", 8000)
             return
-        self.update_button.setEnabled(False)
-        self.update_button.setText("正在更新…")
+        if self._worker_running(self._scan_worker):
+            if _retry < 50 and QTimer is not None:
+                QTimer.singleShot(
+                    100, partial(self._start_update_check, silent, force, _retry + 1))
+            return
+        self._clear_update_failure()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self.progress_label.setText(
             "正在检查官方名单接口…（%s）" % ("强制更新" if force else "自动检查")
         )
+        self.statusBar().showMessage(
+            "正在检查官方名单接口…（%s）" % ("强制更新" if force else "自动检查"), 8000)
         fn = lambda progress, should_cancel: self.service.update_ban_list(  # noqa: E731
             force=force, progress_cb=progress, cancel_cb=should_cancel
         )
@@ -819,14 +1020,47 @@ class MainWindow(QMainWindow):
             on_error=partial(self._on_update_failed, silent),
             on_progress=self._on_update_progress,
         )
+        self._sync_action_buttons()
 
     def _on_update_progress(self, percent: int, message: str) -> None:
         self.progress_bar.setValue(int(percent))
         self.progress_label.setText(message)
 
+    def _mark_update_failure(self, message: str) -> None:
+        """记录更新失败信息：状态栏保留 60s，期间不被扫描/查询进度静默覆盖。"""
+        self._update_failure_message = str(message or "更新名单失败")
+        self._update_failure_until = time.monotonic() + 60.0
+        self.statusBar().showMessage(self._update_failure_message, 60000)
+
+    def _clear_update_failure(self) -> None:
+        """清除失败保留标记（新一轮更新开始时调用，允许用户手动重试）。"""
+        self._update_failure_message = ""
+        self._update_failure_until = 0.0
+
+    def _update_failure_visible(self) -> bool:
+        """更新失败提示是否仍在保留窗口内。"""
+        return bool(self._update_failure_message) and time.monotonic() < self._update_failure_until
+
+    def _show_status_message(self, message: str, timeout: int = 8000,
+                             force: bool = False) -> None:
+        """状态栏提示（更新失败保留期内不覆盖失败信息，避免被进度静默吞掉）。"""
+        if self._update_failure_visible() and not force:
+            return
+        self.statusBar().showMessage(message, timeout)
+
+    def _sync_action_buttons(self) -> None:
+        """统一刷新操作按钮状态：扫描/更新互斥，防重入（含取消按钮显隐）。"""
+        scan_running = self._worker_running(self._scan_worker)
+        update_running = self._worker_running(self._update_worker)
+        idle = not scan_running and not update_running
+        available = self.service.replay_dir_available()
+        for button in (self.scan_latest_button, self.scan_all_button, self.manual_button):
+            button.setEnabled(bool(available) and idle)
+        self.cancel_button.setVisible(scan_running or update_running)
+        self.update_button.setEnabled(idle)
+        self.update_button.setText("正在更新…" if update_running else "更新名单")
+
     def _on_update_finished(self, silent: bool, result: Any) -> None:
-        self.update_button.setEnabled(True)
-        self.update_button.setText("更新名单")
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(100)
         message = getattr(result, "message", "") or "检查完成"
@@ -835,8 +1069,28 @@ class MainWindow(QMainWindow):
             message = "%s；异常：%s" % (message, "；".join(errors[:3]))
         failed = (not getattr(result, "ok", True)) or bool(errors)
         self.progress_label.setText(message)
-        self.statusBar().showMessage("更新名单：%s" % message, 15000)
+        if failed:
+            self._mark_update_failure("更新名单失败：%s" % message)
+        else:
+            self._clear_update_failure()
+            self._show_status_message("更新名单：%s" % message, 15000, force=True)
         self._refresh_data_status()
+        self._sync_action_buttons()
+        first_run_update = self._first_run_update_active
+        self._first_run_update_active = False
+        # 首启流程：名单更新成功且 bans>0 后写持久化完成标记（老用户升级不受影响）。
+        if not failed and self._record_count() > 0:
+            if not bool(self._meta_get(FIRST_RUN_FLOW_META_KEY, False)):
+                self._mark_first_run_flow_done()
+        if first_run_update:
+            if failed or self._record_count() <= 0:
+                reason = message if failed else "官方名单下载完成，但名单库仍为空，请重试"
+                # 失败不静默：状态栏已保留中文错误 + 软件内自绘弹窗允许重试（无系统提示音）。
+                self._show_first_run_update_dialog(error_message=reason)
+            else:
+                self._show_status_message(
+                    "首次使用完成：名单库已就绪（%s 条）"
+                    % "{:,}".format(self._record_count()), 15000, force=True)
         if not silent:
             if failed:
                 QMessageBox.warning(self, "更新名单失败", message)
@@ -844,10 +1098,14 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "更新名单", message)
 
     def _on_update_failed(self, silent: bool, message: str) -> None:
-        self.update_button.setEnabled(True)
-        self.update_button.setText("更新名单")
         self.progress_label.setText(message)
-        self.statusBar().showMessage(message, 15000)
+        self._mark_update_failure(message)
+        self._sync_action_buttons()
+        first_run_update = self._first_run_update_active
+        self._first_run_update_active = False
+        if first_run_update:
+            # 首启流程更新失败：状态栏保留错误 + 弹软件内自绘重试弹窗（不静默、无提示音）。
+            self._show_first_run_update_dialog(error_message=message)
         if not silent:
             QMessageBox.warning(self, "更新名单失败", message)
 
@@ -856,11 +1114,15 @@ class MainWindow(QMainWindow):
         """扫描录像（mode: latest / all；recent 能力仍保留在 service，1.0 UI 无入口）。"""
         if self._worker_running(self._scan_worker):
             return
+        if self._worker_running(self._update_worker):
+            self.statusBar().showMessage("正在更新名单，请稍候再扫描录像…", 10000)
+            return
         if not self.service.is_mock and not self.service.replay_dir_available():
             self._apply_replay_dir_state()
             return
         self._scan_mode = mode
-        self._set_scan_busy(True)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
         days = int(self.service.cfg.default_scan_days)
         fn = lambda progress, should_cancel: self.service.list_replays(  # noqa: E731
             mode=mode, days=days, progress_cb=progress, cancel_cb=should_cancel
@@ -871,17 +1133,15 @@ class MainWindow(QMainWindow):
             on_error=self._on_scan_failed,
             on_progress=self._on_scan_progress,
         )
+        self._sync_action_buttons()
 
     def _set_scan_busy(self, busy: bool) -> None:
-        self.scan_latest_button.setEnabled(not busy)
-        self.scan_all_button.setEnabled(not busy)
-        self.manual_button.setEnabled(not busy)
-        self.cancel_button.setVisible(busy)
         if busy:
             self.progress_bar.setRange(0, 100)
             self.progress_bar.setValue(0)
         else:
             self.progress_bar.setRange(0, 100)
+        self._sync_action_buttons()
 
     def _on_scan_progress(self, percent: int, message: str) -> None:
         self.progress_bar.setValue(int(percent))
@@ -913,7 +1173,8 @@ class MainWindow(QMainWindow):
                 % self.service.cfg.replay_dir,
             )
             self.progress_label.setText("扫描完成：0 个录像")
-            self.statusBar().showMessage("扫描完成：未找到录像文件", 8000)
+            self._show_status_message("扫描完成：未找到录像文件", 8000)
+            self._after_scan_completed()
             return
         complete_count = len([item for item in self._current_replays if not item.is_partial])
         partial_count = len(self._current_replays) - complete_count
@@ -921,15 +1182,21 @@ class MainWindow(QMainWindow):
             "扫描完成：%d 个录像（完整 %d / partial %d）"
             % (len(self._current_replays), complete_count, partial_count)
         )
-        self.statusBar().showMessage(self.progress_label.text(), 8000)
+        self._show_status_message(self.progress_label.text(), 8000)
         if target_index >= 0:
             self._on_replay_index_changed(target_index)
+        # P0 修复：全量扫描结束（无论成功/空/失败/取消）后再触发启动名单检查或首启弹窗②，
+        # 保证更新线程不会与扫描线程并发写 SQLite（database is locked）。
+        self._after_scan_completed()
 
     def _on_scan_failed(self, message: str) -> None:
         self._set_scan_busy(False)
         self.progress_label.setText(message)
         self._show_empty("扫描录像失败", message)
-        self._show_error("扫描录像失败", message)
+        self._show_status_message("扫描录像失败：%s" % message, 15000)
+        QMessageBox.warning(self, "扫描录像失败", message)
+        # 扫描失败同样视为「扫描结束」：启动名单检查/首启弹窗②不能被跳过。
+        self._after_scan_completed()
 
     def _on_cancel_clicked(self) -> None:
         scan_worker = self._scan_worker
@@ -956,7 +1223,9 @@ class MainWindow(QMainWindow):
         """手动载入单个录像文件（真实截图 / 测试脚本复用）。"""
         if not replay_path:
             return False
-        self._set_scan_busy(True)
+        if self._worker_running(self._update_worker):
+            self.statusBar().showMessage("正在更新名单，请稍候再解析录像…", 10000)
+            return False
         self.progress_label.setText("正在解析手动选择的录像…")
         self.progress_bar.setRange(0, 0)
         fn = lambda progress, should_cancel: self.service.list_replays(  # noqa: E731
@@ -968,6 +1237,7 @@ class MainWindow(QMainWindow):
             on_error=self._on_scan_failed,
             on_progress=self._on_scan_progress,
         )
+        self._sync_action_buttons()
         return True
 
     def _on_manual_finished(self, replay_path: str, replays: list) -> None:
@@ -1017,7 +1287,7 @@ class MainWindow(QMainWindow):
         if busy:
             self.progress_bar.setRange(0, 0)
             self.progress_label.setText("正在解析录像并匹配名单…")
-            self.statusBar().showMessage("正在解析录像并匹配名单…")
+            self._show_status_message("正在解析录像并匹配名单…", 0)
         else:
             self.progress_bar.setRange(0, 100)
 
@@ -1034,7 +1304,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(100)
         self.progress_label.setText(result.message)
-        self.statusBar().showMessage(result.message, 10000)
+        self._show_status_message(result.message, 10000)
         self._refresh_current_replay_label(result.replay)
         self._select_first_player()
         self._refresh_summary()
@@ -1355,7 +1625,7 @@ class MainWindow(QMainWindow):
             text += " · partial 录像：仅昵称匹配（同昵称视为同一人，计入黄/红）"
         if visible != summary["total"]:
             text += " · 当前筛选显示 %d 人" % visible
-        text += " · 默认按封禁次数降序 → 本局战力降序 → 伤害降序（None 置后）"
+        text += " · 默认按封禁次数降序 → 本局效率降序 → 伤害降序（None 置后）"
         self.summary_label.setText(text)
 
     # ------------------------------------------------------------ 综合战绩点查 / 刷新
@@ -1450,21 +1720,33 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, title, message)
 
     def auto_start(self) -> None:
-        """窗口显示后的自动动作：刷新数据状态 + 探测本机环境（无需点击）+ 全量扫描录像 + A1 检查。
+        """窗口显示后的自动动作：刷新数据状态 + 探测本机环境 + 首启流程 / 自动扫描。
 
-        1.0.1：启动默认扫描改为「全部录像」（mode="all"），不再只扫最近 7 天窗口，
-        扫描完成后 `_on_scan_finished(mode="all")` 选中列表第 1 个（最新一局）并自动查询；
-        用户手动点「最新完整录像」/ 重新检测等其他触发仍保持 latest 逻辑。
+        首次使用（空名单库且首启流程未完成）：环境探测后**不自动扫描**，先弹软件内自绘
+        弹窗①（开始扫描录像）→ 扫描结束后弹弹窗②（下载官方名单）→ 更新成功（bans>0）
+        后持久化 ``meta.first_run_flow_done=true``；中途关闭/失败则下次启动继续提示
+        （已有录像索引时跳过弹窗①）。
+
+        老用户（已有名单数据）或首启已完成：保持 1.0.1 行为——自动扫描全部录像 +
+        扫描结束后串行触发启动名单检查（P0 防御：冷启动全量扫描 50–165s 期间不再并发写库）。
         """
         self._refresh_data_status()
         self._env_seq += 1
         env = self.service.detect_environment(apply=True)
         self._apply_environment(env)
+        flow = self._first_run_flow_state()
+        if flow.get("active"):
+            # 首启：不自动扫描/更新，等待用户在弹窗里确认。
+            self._startup_update_pending = False
+            self._start_first_run_flow(flow)
+            return
+        if not self._startup_update_done:
+            self._startup_update_pending = True
         if self.service.replay_dir_available():
             self.start_scan("all")
-        if QTimer is not None:
-            # 延后 15 秒，等全量扫描（约 10s）结束后再做名单更新检查，避免与扫描并发写 SQLite。
-            QTimer.singleShot(15000, partial(self._start_update_check, True, False))
+        else:
+            # 扫描未启动（录像目录不可用）：仍在 auto_start 尾部触发一次名单检查。
+            self._schedule_startup_update_check()
 
     def start_environment_detect(self, then_scan: bool = True) -> None:
         """后台探测本机环境（游戏目录 / 我的账号），完成后刷新按钮提示与录像区。"""
@@ -1504,8 +1786,7 @@ class MainWindow(QMainWindow):
     def _apply_replay_dir_state(self) -> None:
         """录像区按 cfg.replay_dir 状态启用/禁用扫描，并给中文提示。"""
         available = self.service.replay_dir_available()
-        for button in (self.scan_latest_button, self.scan_all_button):
-            button.setEnabled(available)
+        self._sync_action_buttons()
         replay_dir = getattr(self.service.cfg, "replay_dir", None)
         if not available:
             self.progress_label.setText(

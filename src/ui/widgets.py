@@ -243,7 +243,7 @@ class ScrollableComboBox(QComboBox):
 # 「坦克」显示游戏车名（盒子 tank_title 优先，缺失时用 game_names 兜底）。
 BATTLE_FIELDS = [
     ("tank", "坦克"),
-    ("combat", "本局战力"),
+    ("combat", "本局效率"),
     ("xp", "经验值"),
     ("shots", "射击"),
     ("piercings", "击穿"),
@@ -267,7 +267,7 @@ BATTLE_FIELDS_PER_ROW = 2
 class PlayerDetailPanel(QWidget):
     """右侧明细面板：玩家信息 + 封禁记录 + 当局战绩 + 综合战绩点查。
 
-    - 当局战绩：按盒子 battledetail 字段顺序展示（坦克 / 本局战力 / 经验值 /
+    - 当局战绩：按盒子 battledetail 字段顺序展示（坦克 / 本局效率 / 经验值 /
       射击 / 击穿 / 造成伤害 / 被击中 / 受到的潜在伤害 / 装甲抵消伤害 / 发现敌人 /
       击伤敌方战车 / 击毁敌方战车 / 协助盟友造成伤害 / 占领敌方基地点数 /
       保卫基地防御点数 / 行驶里程），坦克显示游戏车名；
@@ -452,7 +452,7 @@ class PlayerDetailPanel(QWidget):
         self.player_grid.setHorizontalSpacing(18)
         self.player_grid.setVerticalSpacing(6)
         self.player_values = {}
-        player_fields = [("combat_power", "战力"), ("win_rate", "胜率"), ("avg_damage", "场均伤害"),
+        player_fields = [("combat_power", "效率"), ("win_rate", "胜率"), ("avg_damage", "场均伤害"),
                          ("battles_hint", "出战场次")]
         for index, (key, label) in enumerate(player_fields):
             name_label = QLabel(label)
@@ -937,6 +937,137 @@ class DataStatusDialog(QDialog):
         self.rebuild_button.setEnabled(enabled)
         self.open_data_button.setEnabled(enabled)
         self.open_log_button.setEnabled(enabled)
+
+
+# ---------------------------------------------------------------- 首次使用流程弹窗
+class _FirstRunDialogBase(QDialog):
+    """首次使用流程的自绘弹窗基类（QDialog + 项目 theme 样式）。
+
+    硬要求（用户 2026-11-19 拍板）：
+    - **软件内自绘弹窗**：QDialog + 项目 theme 配色，不用 QMessageBox / 系统级消息框；
+    - **无提示音**：不调用 ``QApplication.beep()``，也不依赖任何系统警告声；
+    - 模态、相对主窗口居中；关闭窗口等同「暂不开始」。
+    """
+
+    def __init__(self, parent: Any = None, title: str = "", heading: str = "",
+                 body: str = "", primary_text: str = "继续",
+                 secondary_text: str = "暂不开始", consent_text: str = "") -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setMinimumWidth(640)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(26, 22, 26, 20)
+        layout.setSpacing(12)
+        self.heading_label = QLabel(heading)
+        self.heading_label.setObjectName("SectionTitle")
+        self.heading_label.setWordWrap(True)
+        layout.addWidget(self.heading_label)
+        self.body_label = QLabel(body)
+        self.body_label.setObjectName("MetaHint")
+        self.body_label.setWordWrap(True)
+        layout.addWidget(self.body_label)
+        self.error_label = QLabel("")
+        self.error_label.setObjectName("LoadingHint")
+        self.error_label.setWordWrap(True)
+        self.error_label.setVisible(False)
+        layout.addWidget(self.error_label)
+        if consent_text:
+            self.consent_label = QLabel(consent_text)
+            self.consent_label.setObjectName("StatsHint")
+            self.consent_label.setWordWrap(True)
+            layout.addWidget(self.consent_label)
+        else:
+            self.consent_label = None
+        button_row = QHBoxLayout()
+        button_row.setSpacing(10)
+        button_row.addStretch(1)
+        self.secondary_button = QPushButton(secondary_text)
+        self.secondary_button.setObjectName("Ghost")
+        self.secondary_button.clicked.connect(self.reject)
+        button_row.addWidget(self.secondary_button)
+        self.primary_button = QPushButton(primary_text)
+        self.primary_button.setObjectName("Primary")
+        self.primary_button.setDefault(True)
+        self.primary_button.clicked.connect(self.accept)
+        button_row.addWidget(self.primary_button)
+        layout.addLayout(button_row)
+
+    def set_error(self, message: str) -> None:
+        """显示失败原因（首次使用更新失败后重试弹窗用；无系统提示音）。
+
+        消息若已带「更新失败：」/「更新名单失败：」前缀则不再重复加前缀，
+        避免出现「更新失败：更新名单失败：…」双前缀。
+        """
+        text = str(message or "").strip()
+        if text and not (text.startswith("更新失败：")
+                         or text.startswith("更新名单失败：")):
+            text = "更新失败：%s" % text
+        self.error_label.setText(text)
+        self.error_label.setVisible(bool(text))
+
+    def _center_on_parent(self) -> None:
+        """相对主窗口居中（失败时不影响弹窗显示）。"""
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        try:
+            geometry = parent.frameGeometry()
+            self.adjustSize()
+            self.move(geometry.center() - self.rect().center())
+        except Exception:  # noqa: BLE001
+            pass
+
+    def exec_centered(self) -> int:
+        """模态显示（居中；返回值同 QDialog.exec：1=Accepted / 0=Rejected）。"""
+        self._center_on_parent()
+        return int(self.exec())
+
+
+class FirstRunScanDialog(_FirstRunDialogBase):
+    """首次使用弹窗①：用途/本地数据/免责声明 + 开始扫描录像（点击即视为同意使用）。"""
+
+    def __init__(self, parent: Any = None) -> None:
+        super().__init__(
+            parent,
+            title="首次使用 · 开始扫描录像",
+            heading="欢迎使用坦克世界封号案底查询工具",
+            body=(
+                "本软件全本地运行：扫描本机 .wotreplay 录像并与官方历史封禁名单比对，"
+                "不上传任何数据、无遥测、不联网查询玩家。\n\n"
+                "历史封禁记录 ≠ 当前违规 / 当前开挂，仅供个人自查与观战复盘；"
+                "严禁用于挂人、网络暴力、骚扰或任何处罚依据。\n\n"
+                "首次使用需要先扫描录像建立索引（本机约 12,851 个录像，"
+                "冷启动约 1–3 分钟，期间可随时取消）。"
+            ),
+            primary_text="开始扫描录像",
+            secondary_text="暂不开始",
+            consent_text="点击「开始扫描录像」即表示你已阅读并同意使用本软件。",
+        )
+        self.dialog_kind = "first_run_scan"
+
+
+class FirstRunUpdateDialog(_FirstRunDialogBase):
+    """首次使用弹窗②：说明下载 360 官方公开封禁名单（只读低频）+ 开始更新名单。"""
+
+    def __init__(self, parent: Any = None, error_message: str = "") -> None:
+        super().__init__(
+            parent,
+            title="首次使用 · 下载官方封禁名单",
+            heading="名单库为空：需要下载 360 官方公开封禁名单",
+            body=(
+                "将从 360 官方公开接口只读、低频下载历史封禁名单（约 5–6 分钟）；"
+                "遇官方风控（403/412/429/503）会立即中止并给出中文提示，不绕过风控。\n\n"
+                "名单数据只保存在本机，不上传、不导出；历史记录不代表当前违规，"
+                "非官方处罚依据。"
+            ),
+            primary_text="开始更新名单",
+            secondary_text="稍后再说",
+            consent_text="下载完成前请保持网络畅通；更新期间可点「取消」中止。",
+        )
+        self.dialog_kind = "first_run_update"
+        if error_message:
+            self.set_error(error_message)
 
 
 def main(argv: list) -> int:

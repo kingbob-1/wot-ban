@@ -109,7 +109,7 @@ class Config:
 
     # ------------------------------------------------------------ 界面
     app_name: str = "坦克世界封号案底查询工具"
-    app_version: str = "1.0.1"
+    app_version: str = "1.0.2"
     window_width: int = 1920
     window_height: int = 1080
 

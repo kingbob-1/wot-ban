@@ -7,14 +7,20 @@
 2. 解析便携 CPython 3.12 下载地址（python-build-standalone）；
 3. 下载并校验 CPython 便携包（tar.gz）；
 4. 解压到构建目录；
-5. 向便携解释器安装 PySide6（默认清华镜像，可配代理）；
-6. 组装便携包目录：复制源码 + 薄启动器 exe/图标/启动器文档 + 生成便携版 run.bat + 许可证/说明；
-7. 自检：便携解释器 import PySide6、跑 src/main.py --version；
-8. 打包 zip 并输出大小与 sha256。
+5. 向便携解释器安装运行期依赖 PySide6 / requests / openpyxl（默认清华镜像，可配代理）；
+6. 组装便携包目录：复制源码（排除缓存/编译产物与本地 QA 脚本）+ docs/images 首图 +
+   薄启动器 exe/图标/启动器文档 + 生成便携版 run.bat + 许可证/说明；
+7. 自检：便携解释器 import PySide6/requests/openpyxl 与 ``src.stats.box_client``、
+   跑 src/main.py --version；
+8. 清理自检运行产生的 ``src/**/__pycache__``、``*.pyc`` 后打包 zip 并输出大小与 sha256。
 
 说明
 ----
-- 便携包 = 薄启动器 exe（不含 Python）+ 内嵌 CPython 3.12（包内 ``runtime\\`` 目录）+ PySide6 动态库 + 源码；
+- 便携包 = 薄启动器 exe（不含 Python）+ 内嵌 CPython 3.12（包内 ``runtime\\`` 目录）+ PySide6 动态库 + 运行期依赖 + 源码；
+- ``requests`` 是盒子战绩链路硬依赖（``src/stats/box_client.py``），``openpyxl`` 用于 xlsx 期名单导入，
+  两者缺失会让新用户「盒子战绩全链路失效 / xlsx 导入不可用」，故随包安装并在自检中验证；
+- 包内 README 首图相对链接为 ``docs/images/v1.0-main.jpg``，组装时复制 ``docs/images/``；
+  ``docs/shots/`` 是本地 gitignored 截图目录（含玩家昵称/账号 ID），仍严禁入包；
 - ``--dry-run`` 只做参数解析、源码检查与步骤预览，不下载、不安装、不写盘；
 - 默认不执行任何网络请求；只有实际构建（非 dry-run）或显式 ``--check-url`` 时才联网。
 
@@ -53,16 +59,25 @@ PLAN_TITLES = [
     "解析便携 CPython 3.12 下载地址",
     "下载 CPython 便携包",
     "解压 CPython 便携包",
-    "安装 PySide6",
+    "安装 Python 依赖（PySide6 / requests / openpyxl）",
     "组装便携包目录",
     "自检便携环境",
-    "打包 zip 并输出校验信息",
+    "清理源码缓存并打包 zip",
 ]
 
 # 仅用于本地出图/QA 的开发脚本：被 .gitignore 排除且含本机路径，不得进入便携包
 LOCAL_QA_SCRIPTS = ("screenshot.py", "screenshot_real.py", "run_qa_guarded.py")
-# 复制 src 源码树时的排除规则：Python 缓存/编译产物 + 本地 QA 脚本
-SOURCE_IGNORE_PATTERNS = ("__pycache__", "*.pyc", "*.pyd") + LOCAL_QA_SCRIPTS
+# 复制源码树时的排除规则：Python 缓存/编译产物 + 本地 QA 脚本
+SOURCE_IGNORE_PATTERNS = ("__pycache__", "*.pyc", "*.pyo", "*.pyd", ".pytest_cache") + LOCAL_QA_SCRIPTS
+
+# 便携包运行期依赖（PySide6 版本由 BuildConfig.pyside_version 决定）：
+# requests 是盒子战绩链路硬依赖（src/stats/box_client.py），openpyxl 用于 xlsx 期名单导入；
+# 两者缺失会导致新用户「盒子战绩全链路失效 / xlsx 导入不可用」，必须随包安装并自检。
+RUNTIME_PIP_PACKAGES = ("requests", "openpyxl")
+# 便携环境自检必须成功 import 的模块（含业务模块，验证依赖在包内真实可用）
+RUNTIME_IMPORT_CHECKS = ("PySide6", "requests", "openpyxl", "src.stats.box_client")
+# 自检运行会在源码树里生成 Python 缓存；压缩前必须清理，不得进入 zip
+SOURCE_CACHE_SUFFIXES = (".pyc", ".pyo")
 
 
 class BuildError(Exception):
@@ -159,7 +174,8 @@ def print_header(cfg: BuildConfig) -> None:
     print("项目根目录 : %s" % cfg.project_root)
     print("目标平台   : Windows x64（当前 %s %s）" % (platform.system(), platform.machine()))
     print("CPython    : %s（python-build-standalone %s）" % (cfg.python_version, cfg.python_tag))
-    print("PySide6    : %s" % cfg.pyside_version)
+    print("运行期依赖 : %s" % ", ".join(runtime_package_specs(cfg)))
+    print("自带图片   : docs/images/（README 首图；docs/shots 仍不入包）")
     print("输出目录   : %s" % cfg.output_dir)
     print("构建目录   : %s" % cfg.work_dir)
     print("模式       : %s" % ("DRY-RUN（只预览，不下载不打包）" if cfg.dry_run else "实际构建"))
@@ -183,10 +199,14 @@ def print_plan(cfg: BuildConfig, state: BuildState, problems: list) -> None:
     else:
         print("计划下载地址 : %s" % state.python_url)
         print("预计下载体积 : 约 %s（CPython 便携包）" % format_size(44900000))
-    print("预计成品体积 : 约 250 MB（CPython + PySide6 + 源码，zip 后体积会小一些）")
+    print("预计成品体积 : 约 250 MB（CPython + PySide6/requests/openpyxl + 源码，zip 后体积会小一些）")
     print("成品 zip     : %s" % (cfg.output_dir / build_zip_name(cfg)))
     print("便携版入口   : 包内 坦克世界封号查询.exe（双击启动；内嵌运行时位于包内 runtime\\ 目录）")
     print("备用入口     : 包内 run.bat（全 ASCII，直接调用包内 runtime\\pythonw.exe）")
+    print("运行期依赖   : %s（pip 安装；requests 为盒子战绩硬依赖，openpyxl 用于 xlsx 导入）"
+          % ", ".join(runtime_package_specs(cfg)))
+    print("随包图片     : docs/images/（README 首图；docs/shots 本地截图仍不入包）")
+    print("压缩前清理   : src/**/__pycache__、*.pyc、*.pyo 与 .pytest_cache 不进入 zip")
     print("")
     if problems:
         print("源码/环境检查：发现 %d 个问题" % len(problems))
@@ -203,7 +223,9 @@ def collect_source_files(cfg: BuildConfig) -> dict:
     """返回需要随便携包分发的源码/说明文件清单。
 
     注意：``docs/shots/`` 是本地 gitignored 截图目录（含玩家昵称/账号 ID），
-    既不是必需品、也不得进入便携包（发行包承诺不含任何界面截图），故不在此列。
+    既不是必需品、也不得进入便携包（发行包承诺不含任何界面截图），故不在此列；
+    ``docs/images/`` 是仓库内唯一的打码 README 首图目录（README 相对链接指向它），
+    需要随包复制，否则包内 README 首图断链。
     """
     root = cfg.project_root
     return {
@@ -214,6 +236,7 @@ def collect_source_files(cfg: BuildConfig) -> dict:
         "docs/使用说明.md": root / "docs" / "使用说明.md",
         "docs/第三方组件许可.md": root / "docs" / "第三方组件许可.md",
         "docs/P4-启动器.md": root / "docs" / "P4-启动器.md",
+        "docs/images（README 首图目录）": root / "docs" / "images",
         "坦克世界封号查询.exe": root / "坦克世界封号查询.exe",
         "assets/app.ico": root / "assets" / "app.ico",
     }
@@ -422,6 +445,15 @@ def run_python_command(cfg: BuildConfig, python_dir: Path, args: list, timeout: 
         return subprocess.CompletedProcess(command, 1, "", "命令无法启动：%s" % exc)
 
 
+def runtime_package_specs(cfg: BuildConfig) -> list:
+    """pip 安装清单：PySide6 按构建配置锁版本，requests/openpyxl 与运行期依赖口径一致。
+
+    requirements.txt 不在仓库内（公开版不额外维护依赖清单），故此处显式列出：
+    ``PySide6==<pyside_version>`` + ``requests`` + ``openpyxl``。
+    """
+    return ["PySide6==%s" % cfg.pyside_version] + list(RUNTIME_PIP_PACKAGES)
+
+
 def ensure_pip(cfg: BuildConfig, python_dir: Path) -> None:
     """确保便携解释器内可用 pip（部分便携构建未自带 pip）。"""
     probe = run_python_command(cfg, python_dir, ["-m", "pip", "--version"], timeout=60)
@@ -447,10 +479,16 @@ def ensure_pip(cfg: BuildConfig, python_dir: Path) -> None:
     print("      get-pip.py 安装完成")
 
 
-def install_pyside(cfg: BuildConfig, python_dir: Path) -> None:
-    """向便携解释器安装 PySide6。"""
+def install_runtime_deps(cfg: BuildConfig, python_dir: Path) -> None:
+    """向便携解释器安装运行期依赖：PySide6 + requests + openpyxl。
+
+    回归背景（v1.0.1 便携包 P1）：只装 PySide6 时新用户盒子战绩 100% 失效
+    （``No module named 'requests'``）、xlsx 期名单导入不可用，故依赖清单必须与
+    ``src/stats/box_client.py``（requests）和 ``src/fetcher/parsers.py``（openpyxl）对齐。
+    """
     ensure_pip(cfg, python_dir)
     python_exe = str(bundled_python_exe(python_dir))
+    packages = runtime_package_specs(cfg)
     command = [
         python_exe,
         "-m",
@@ -460,8 +498,7 @@ def install_pyside(cfg: BuildConfig, python_dir: Path) -> None:
         "--no-warn-script-location",
         "--index-url",
         cfg.index_url,
-        "PySide6==%s" % cfg.pyside_version,
-    ]
+    ] + packages
     print("      执行：%s" % " ".join(command))
     result = subprocess.run(
         command,
@@ -475,8 +512,9 @@ def install_pyside(cfg: BuildConfig, python_dir: Path) -> None:
     if result.returncode != 0:
         tail = (result.stdout or "")[-1500:] + (result.stderr or "")[-1500:]
         raise BuildError(
-            "PySide6 安装失败（pip 退出码 %d）" % result.returncode,
-            "检查网络/代理与 --index-url；详细输出：" + tail,
+            "Python 依赖安装失败（pip 退出码 %d）" % result.returncode,
+            "检查网络/代理与 --index-url（需安装 %s）；详细输出：%s"
+            % (", ".join(packages), tail),
         )
 
 
@@ -603,21 +641,36 @@ def copy_source_tree(cfg: BuildConfig, stage_dir: Path) -> None:
     p4_doc = root / "docs" / "P4-启动器.md"
     if p4_doc.is_file():
         shutil.copy2(p4_doc, docs_target / p4_doc.name)
+    # README 首图目录随包复制（相对链接 docs/images/v1.0-main.jpg 在包内可用）；
+    # docs/shots 本地截图绝不复制（含玩家昵称/账号 ID）。
+    images_source = root / "docs" / "images"
+    if images_source.is_dir():
+        shutil.copytree(images_source, docs_target / "images")
     write_portable_run_bat(stage_dir / "run.bat")
 
 
 def verify_stage(cfg: BuildConfig, stage_dir: Path, python_dir: Path) -> dict:
-    """自检便携环境：import PySide6 / 跑 src/main.py --version。"""
+    """自检便携环境：依赖可导入（PySide6/requests/openpyxl/box_client）+ 跑 --version。
+
+    直接用包内解释器在包目录内 import 业务模块，验证「便携包缺少 requests/openpyxl
+    导致新用户盒子战绩全链路失效」这类依赖缺失问题在构建阶段就能暴露。
+    """
     python_exe = str(bundled_python_exe(python_dir))
     env = subprocess_env(cfg)
+    # 自检不写 .pyc：双保险（-B 参数 + PYTHONDONTWRITEBYTECODE），压缩前仍会统一清理
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     check_code = (
         "import sys; import PySide6; from PySide6 import QtCore; "
+        "import requests; import openpyxl; import src.stats.box_client; "
         "print('python=' + sys.version.split()[0]); "
         "print('PySide6=' + PySide6.__version__); "
+        "print('requests=' + requests.__version__); "
+        "print('openpyxl=' + openpyxl.__version__); "
+        "print('box_client=ok'); "
         "print('Qt=' + QtCore.qVersion())"
     )
     result = subprocess.run(
-        [python_exe, "-c", check_code],
+        [python_exe, "-B", "-c", check_code],
         cwd=str(stage_dir),
         env=env,
         capture_output=True,
@@ -627,11 +680,13 @@ def verify_stage(cfg: BuildConfig, stage_dir: Path, python_dir: Path) -> dict:
     )
     if result.returncode != 0:
         raise BuildError(
-            "便携环境自检失败：PySide6 无法导入（%s）" % ((result.stderr or "").strip()[-800:]),
-            "检查 PySide6 安装是否完整，或改用其他 PySide6 版本重试",
+            "便携环境自检失败：运行期依赖无法导入（需要 %s）；%s"
+            % (" / ".join(RUNTIME_IMPORT_CHECKS), (result.stderr or "").strip()[-800:]),
+            "检查便携包内 site-packages 是否含 requests/openpyxl（install_runtime_deps 依赖清单），"
+            "或改用其他 PySide6 版本重试",
         )
     version_result = subprocess.run(
-        [python_exe, str(stage_dir / "src" / "main.py"), "--version"],
+        [python_exe, "-B", str(stage_dir / "src" / "main.py"), "--version"],
         cwd=str(stage_dir),
         env=env,
         capture_output=True,
@@ -646,6 +701,11 @@ def verify_stage(cfg: BuildConfig, stage_dir: Path, python_dir: Path) -> dict:
         )
     report = {
         "python_info": (result.stdout or "").strip().splitlines(),
+        "dependency_versions": [
+            line for line in (result.stdout or "").strip().splitlines()
+            if line.startswith(("PySide6=", "requests=", "openpyxl=", "box_client="))
+        ],
+        "runtime_packages": runtime_package_specs(cfg),
         "app_version_output": (version_result.stdout or "").strip(),
         "launcher_output": "",
     }
@@ -671,13 +731,66 @@ def verify_stage(cfg: BuildConfig, stage_dir: Path, python_dir: Path) -> dict:
     return report
 
 
+def list_source_cache_artifacts(stage_dir: Path) -> list:
+    """列出源码树（stage/src）中残留的 Python 缓存/编译产物（相对路径）。"""
+    src_dir = Path(stage_dir) / "src"
+    leaked = []
+    if not src_dir.is_dir():
+        return leaked
+    for path in sorted(src_dir.rglob("*")):
+        relative = path.relative_to(stage_dir).as_posix()
+        if "__pycache__" in path.parts:
+            leaked.append(relative + ("/" if path.is_dir() else ""))
+        elif path.is_file() and path.suffix.lower() in SOURCE_CACHE_SUFFIXES:
+            leaked.append(relative)
+    return leaked
+
+
+def purge_source_caches(stage_dir: Path) -> int:
+    """压缩前删除源码树里的 Python 缓存（自检运行会生成），返回删除的文件数。
+
+    P2 回归背景（v1.0.1 便携包）：自检 ``src/main.py --version`` 在 compress 之前运行，
+    会把 ``src/**/__pycache__/*.pyc`` 写进包里（zip 混入 9 个 pyc），故自检后必须清理。
+    """
+    src_dir = Path(stage_dir) / "src"
+    if not src_dir.is_dir():
+        return 0
+    removed = 0
+    for cache_dir in sorted(src_dir.rglob("__pycache__")):
+        removed += sum(1 for item in cache_dir.rglob("*") if item.is_file())
+        shutil.rmtree(cache_dir, ignore_errors=True)
+    for pattern in ("*.pyc", "*.pyo"):
+        for item in sorted(src_dir.rglob(pattern)):
+            if item.is_file():
+                try:
+                    item.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+    return removed
+
+
+def assert_no_source_caches(stage_dir: Path) -> None:
+    """自检：源码树不得残留 __pycache__ / *.pyc / *.pyo（应在压缩前清理）。"""
+    leaked = list_source_cache_artifacts(stage_dir)
+    if leaked:
+        raise BuildError(
+            "便携包源码树混入 Python 缓存：%s" % ", ".join(leaked[:5]),
+            "压缩前先执行 purge_source_caches（见 execute_build 第 8 步）",
+        )
+
+
 def create_zip(stage_dir: Path, zip_path: Path) -> Path:
-    """把便携包目录压缩成 zip。"""
+    """把便携包目录压缩成 zip（跳过 __pycache__ 与 *.pyc/.pyo 兜底）。"""
     zip_path.parent.mkdir(parents=True, exist_ok=True)
     base_parent = stage_dir.parent
     with zipfile.ZipFile(str(zip_path), "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive_obj:
         for current_dir, _dir_names, file_names in os.walk(str(stage_dir)):
+            if "__pycache__" in Path(current_dir).parts:
+                continue
             for file_name in file_names:
+                if Path(file_name).suffix.lower() in SOURCE_CACHE_SUFFIXES:
+                    continue
                 full_path = Path(current_dir) / file_name
                 arc_name = full_path.relative_to(base_parent).as_posix()
                 archive_obj.write(str(full_path), arc_name)
@@ -766,7 +879,7 @@ def execute_build(cfg: BuildConfig, state: BuildState) -> int:
     print_step(4, total, PLAN_TITLES[3], time.perf_counter() - step_start, "完成（%s）" % state.python_dir)
 
     step_start = time.perf_counter()
-    install_pyside(cfg, state.python_dir)
+    install_runtime_deps(cfg, state.python_dir)
     print_step(5, total, PLAN_TITLES[4], time.perf_counter() - step_start, "完成")
 
     step_start = time.perf_counter()
@@ -792,6 +905,13 @@ def execute_build(cfg: BuildConfig, state: BuildState) -> int:
     print_step(7, total, PLAN_TITLES[6], time.perf_counter() - step_start, "完成")
 
     step_start = time.perf_counter()
+    # 自检运行会在源码树里写 __pycache__/*.pyc：压缩前统一清理，避免混入 zip（v1.0.1 P2）
+    purged = purge_source_caches(stage_dir)
+    assert_no_source_caches(stage_dir)
+    if purged:
+        print("[清理] 压缩前清理自检产生的源码缓存：%d 个文件（__pycache__/*.pyc）" % purged)
+    state.report = state.report or {}
+    state.report["purged_cache_files"] = purged
     state.zip_path = create_zip(stage_dir, cfg.output_dir / build_zip_name(cfg))
     zip_size = state.zip_path.stat().st_size
     zip_sha = sha256_file(state.zip_path)
