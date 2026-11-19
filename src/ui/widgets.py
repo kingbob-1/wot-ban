@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""界面组件：右侧明细面板、名单库状态对话框。
+"""界面组件：右侧明细面板、名单库状态对话框、可滚动下拉框。
 
 - ``PlayerDetailPanel``：选中玩家的封禁记录 + 当局战绩 + 综合战绩点查；
-- ``DataStatusDialog``：名单库状态页（批次数 / 条数 / 更新时间 / wgid 覆盖 / 缺失批次）。
+- ``DataStatusDialog``：名单库状态页（批次数 / 条数 / 更新时间 / wgid 覆盖 / 缺失批次）；
+- ``ScrollableComboBox``：弹窗最多显示 N 行、超出部分用竖向滚动条查看的下拉框。
 """
 from __future__ import annotations
 
@@ -11,10 +12,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 try:
-    from PySide6.QtCore import Qt, Signal
+    from PySide6.QtCore import QPoint, Qt, Signal
+    from PySide6.QtGui import QGuiApplication
     from PySide6.QtWidgets import (
         QAbstractItemView,
         QApplication,
+        QComboBox,
         QDialog,
         QDialogButtonBox,
         QFrame,
@@ -22,6 +25,7 @@ try:
         QHBoxLayout,
         QHeaderView,
         QLabel,
+        QListView,
         QPushButton,
         QScrollArea,
         QSizePolicy,
@@ -97,6 +101,132 @@ def _plain_table(columns: list, stretch_last: bool = True, widths: Optional[list
         header.setStretchLastSection(True)
     table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
     return table
+
+
+# 当前对局下拉框弹窗最多显示的行数（更多内容用滚动条查看）。
+COMBO_VISIBLE_ROWS = 15
+
+
+class ScrollableComboBox(QComboBox):
+    """下拉框：弹窗最多显示 ``visible_rows`` 行，超出部分用竖向滚动条查看。
+
+    背景（2026-11-19 实测）：应用级 QSS 会让 Qt 的 QComboBox 弹窗退化成「菜单式」——
+    弹窗铺满整屏、``maxVisibleItems`` 失效、只有菜单式滚动箭头而没有滚动条。这里改用
+    独立的 ``Qt.Popup`` 窗口 + ``QListView`` 自绘弹窗：复用下拉框自身的数据模型与
+    item delegate，选中项同步 ``currentIndex``，点击外部 / Esc 自动关闭，外观由主题 QSS 控制。
+    """
+
+    def __init__(self, visible_rows: int = COMBO_VISIBLE_ROWS, parent: Any = None) -> None:
+        super().__init__(parent)
+        self.visible_rows = max(1, int(visible_rows))
+        self.setMaxVisibleItems(self.visible_rows)  # 键盘 / 无障碍语义保持一致
+        self._popup: Any = None
+        self._list: Any = None
+
+    # ------------------------------------------------------------ 弹窗构建
+    def _ensure_popup(self) -> None:
+        """惰性构建弹窗（复用 QComboBox 的模型与 item delegate）。"""
+        if self._popup is not None:
+            return
+        popup = QFrame(self, Qt.WindowType.Popup)
+        popup.setObjectName("ComboPopup")
+        popup.setFrameShape(QFrame.Shape.NoFrame)
+        layout = QVBoxLayout(popup)
+        layout.setContentsMargins(1, 1, 1, 1)
+        layout.setSpacing(0)
+        view = QListView(popup)
+        view.setObjectName("ComboPopupList")
+        view.setUniformItemSizes(True)
+        view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        view.setModel(self.model())
+        try:
+            view.setItemDelegate(self.itemDelegate())
+        except Exception:  # noqa: BLE001 - 取不到 delegate 时退回默认渲染
+            pass
+        view.clicked.connect(self._on_popup_index_activated)
+        view.activated.connect(self._on_popup_index_activated)
+        layout.addWidget(view)
+        self._popup = popup
+        self._list = view
+
+    def popup_height(self) -> int:
+        """弹窗内容高度：最多 ``visible_rows`` 行的像素高度（含边框）。"""
+        self._ensure_popup()
+        view = self._list
+        row_height = 0
+        model = view.model() if view is not None else None
+        if model is not None and model.rowCount() > 0:
+            row_height = int(view.sizeHintForRow(0))
+        if row_height <= 0:
+            row_height = max(18, self.fontMetrics().height() + 12)
+        rows = max(1, min(self.count(), self.visible_rows))
+        # +4 像素余量：sizeHintForRow 在弹出前的估算可能比实际行高小 1~2 px，
+        # 余量保证最后一行不被裁切、也不误触发滚动条。
+        return row_height * rows + 2 * int(view.frameWidth()) + 4
+
+    # ------------------------------------------------------------ 弹出 / 收起
+    def showPopup(self) -> None:  # noqa: N802 - Qt 命名
+        """显示弹窗；已显示时再次触发则收起（点击切换）。"""
+        if self._popup is not None and self._popup.isVisible():
+            self.hidePopup()
+            return
+        if self.count() <= 0:
+            return
+        self._ensure_popup()
+        view = self._list
+        height = self.popup_height()
+        width = max(320, self.width())
+        anchor = self.mapToGlobal(QPoint(0, self.height()))
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            width = min(width, available.width())
+            height = min(height, available.height())
+            if anchor.y() + height > available.bottom():
+                anchor.setY(max(available.top(), self.mapToGlobal(QPoint(0, 0)).y() - height))
+            anchor.setX(max(available.left(), min(anchor.x(), available.right() - width)))
+        self._popup.setFixedSize(width, height)
+        self._popup.move(anchor)
+        model = view.model()
+        current = max(0, self.currentIndex())
+        if model is not None and 0 <= current < model.rowCount():
+            index = model.index(current, 0)
+            view.setCurrentIndex(index)
+            view.scrollTo(index)
+        self._popup.show()
+        self._popup.raise_()
+        view.setFocus()
+
+    def hidePopup(self) -> None:  # noqa: N802 - Qt 命名
+        """收起弹窗（不改变当前选中）。"""
+        if self._popup is not None:
+            self._popup.hide()
+
+    def _on_popup_index_activated(self, index: Any) -> None:
+        """弹窗里点选 / 回车选中一项：同步 ``currentIndex`` 并收起。"""
+        if index is not None and index.isValid():
+            self.setCurrentIndex(index.row())
+        self.hidePopup()
+
+    def clear(self) -> None:
+        """清空选项前先收起弹窗，避免弹窗展示已清空的模型。"""
+        self.hidePopup()
+        super().clear()
+
+    def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt 命名
+        """下拉框自身被隐藏时顺带收起弹窗。"""
+        self.hidePopup()
+        super().hideEvent(event)
+
+    def wheelEvent(self, event: Any) -> None:  # noqa: N802 - Qt 命名
+        """弹窗打开时吞掉滚轮事件，避免误改当前对局（滚动请在弹窗内操作）。"""
+        if self._popup is not None and self._popup.isVisible():
+            event.accept()
+            return
+        super().wheelEvent(event)
 
 
 class PlayerDetailPanel(QWidget):

@@ -260,6 +260,28 @@ QComboBox::drop-down {
     border: none;
     width: 22px;
 }
+/* 当前对局下拉框的自绘弹窗（最多 15 行 + 竖向滚动条，见 widgets.ScrollableComboBox） */
+QFrame#ComboPopup {
+    background: #ffffff;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+}
+QFrame#ComboPopup QListView {
+    background: transparent;
+    border: none;
+    outline: 0;
+}
+QFrame#ComboPopup QListView::item {
+    padding: 5px 10px;
+    color: #1f2937;
+}
+QFrame#ComboPopup QListView::item:hover {
+    background: #eff6ff;
+}
+QFrame#ComboPopup QListView::item:selected {
+    background: #dbeafe;
+    color: #111827;
+}
 QCheckBox {
     spacing: 6px;
 }

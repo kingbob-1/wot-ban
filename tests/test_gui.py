@@ -168,6 +168,13 @@ def test_main_window_mock_flow(qapp):
     assert not hasattr(window, "meta_labels") and not hasattr(window, "mode_hint")
     assert not hasattr(window, "env_game_label") and not hasattr(window, "env_account_label")
 
+    # 「当前对局」下拉：弹窗最多 15 行 + 滚动条（自绘弹窗，规避 QSS 菜单式弹窗）
+    from src.ui.widgets import COMBO_VISIBLE_ROWS, ScrollableComboBox
+
+    assert isinstance(window.replay_combo, ScrollableComboBox)
+    assert window.replay_combo.visible_rows == COMBO_VISIBLE_ROWS == 15
+    assert window.replay_combo.maxVisibleItems() == 15
+
     # A1：定时器间隔 = 配置 6 小时
     expected_ms = int(load_config().update_interval_hours * 3600 * 1000)
     assert window.update_timer_interval_ms() == expected_ms
@@ -410,3 +417,42 @@ def test_main_window_update_failure_is_chinese(qapp):
     assert window.update_button.isEnabled()
     window.close()
     service.dispose()
+
+
+def test_scrollable_combo_popup_15_rows_with_scrollbar(qapp):
+    """「当前对局」下拉：弹窗最多 15 行，条目超过 15 时出现竖向滚动条，可反复开关。"""
+    from src.ui.widgets import COMBO_VISIBLE_ROWS, ScrollableComboBox
+
+    combo = ScrollableComboBox()
+    assert combo.visible_rows == COMBO_VISIBLE_ROWS == 15
+    assert combo.maxVisibleItems() == 15
+    for index in range(20):
+        combo.addItem("2026-11-15 00:00:%02d · 地图 · 完整 · 30 人" % index, index)
+    combo.resize(600, 30)
+    combo.show()
+    qapp.processEvents()
+
+    combo.showPopup()
+    qapp.processEvents()
+    popup = combo._popup
+    view = combo._list
+    assert popup is not None and popup.isVisible(), "下拉弹窗未显示"
+    row_height = max(1, view.sizeHintForRow(0))
+    # 弹窗高度 = 最多 15 行 + 边框余量（再多就被滚动条替代）
+    assert popup.height() <= row_height * COMBO_VISIBLE_ROWS + 12
+    # 20 条 > 15 行 ⇒ 需要滚动条（ScrollPerPixel 模式下 maximum 为像素值，> 0 即存在滚动）
+    assert view.verticalScrollBar().maximum() > 0, "条目超过 15 行时应出现竖向滚动条"
+
+    # 点击第二项：currentIndex 同步并收起弹窗
+    combo._on_popup_index_activated(view.model().index(1, 0))
+    qapp.processEvents()
+    assert combo.currentIndex() == 1
+    assert not popup.isVisible()
+    # 再次打开 / 再次触发关闭（点击切换）
+    combo.showPopup()
+    qapp.processEvents()
+    assert popup.isVisible()
+    combo.showPopup()
+    qapp.processEvents()
+    assert not popup.isVisible()
+    combo.close()

@@ -64,7 +64,7 @@ try:
         STATS_STATE_UNAVAILABLE,
         PlayerTableModel,
     )
-    from .widgets import DataStatusDialog, PlayerDetailPanel
+    from .widgets import DataStatusDialog, PlayerDetailPanel, ScrollableComboBox
 except ImportError:  # 直接以脚本方式运行时的兜底
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from src import models
@@ -84,7 +84,7 @@ except ImportError:  # 直接以脚本方式运行时的兜底
         STATS_STATE_UNAVAILABLE,
         PlayerTableModel,
     )
-    from src.ui.widgets import DataStatusDialog, PlayerDetailPanel
+    from src.ui.widgets import DataStatusDialog, PlayerDetailPanel, ScrollableComboBox
 
 SCAN_MODE_LABELS = {"latest": "最新完整录像", "recent": "最近 7 天", "all": "全部录像", "file": "手动选择"}
 
@@ -289,7 +289,8 @@ class MainWindow(QMainWindow):
             row.addWidget(button)
         row.addSpacing(10)
         row.addWidget(QLabel("当前对局"))
-        self.replay_combo = QComboBox()
+        # 下拉弹窗最多显示 15 局，超出部分用竖向滚动条查看（见 widgets.ScrollableComboBox）
+        self.replay_combo = ScrollableComboBox()
         self.replay_combo.setMinimumWidth(520)
         self.replay_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         row.addWidget(self.replay_combo, 1)
