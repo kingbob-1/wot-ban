@@ -2162,3 +2162,122 @@ def test_first_run_update_failure_dialog_no_duplicate_prefix(qapp):
         assert dialog.error_label.text() == "更新失败：官方接口返回 403 风控"
     finally:
         dialog.close()
+
+
+# ---------------------------------------------------------------- 首启更新成功后自动刷新结果（task-29 P2）
+def test_first_run_update_success_requeries_current_replay_and_refreshes_hits(
+        qapp, monkeypatch, tmp_path):
+    """首启：扫描结束（名单空，命中 0）→ 名单更新成功 → 自动重跑查询，「命中 0」变「命中 1」。
+
+    BUG-1（P2）：扫描结束时已启动的那次查询发生在名单库仍为空时；首启更新成功后若
+    不重跑，结果表/汇总会一直显示「命中 0 人」，新用户会以为工具坏了。修复要求：
+    更新成功后用 ``singleShot(0)`` 重跑当前选中对局（等 worker 释放、不重复查询），
+    普通（非首启）更新路径行为不变。
+    """
+    import threading
+
+    from src.app import mock_data
+    from src.app.service import BattleStatsResult, ReplayQueryResult
+
+    replays = mock_data.build_replays()
+    service = make_real_service(tmp_path / "first-run-requery.db")
+    window = make_first_run_window(qapp, service, monkeypatch)
+    state = {"bans": 0}                     # 0 = 更新前名单为空；1 = 更新成功后非空
+    query_calls = []
+    first_query_done = threading.Event()
+
+    def build_query_result(hits):
+        detail = mock_data.build_detail(replays[0])
+        matches = mock_data.build_matches(detail)
+        for player in matches:
+            player.match_type = models.MATCH_TYPE_NONE
+            player.ban_count = 0
+            player.level = models.LEVEL_NONE
+            player.records = []
+        if hits:
+            hit_player = matches[0]
+            hit_player.match_type = models.MATCH_TYPE_ID
+            hit_player.ban_count = 1
+            hit_player.level = models.LEVEL_YELLOW
+            hit_player.records = [models.BanRecord(
+                batch_day="2026-11-06", nickname=hit_player.nickname,
+                reason="测试", duration="永久")]
+        yellow = sum(1 for player in matches if player.level == models.LEVEL_YELLOW)
+        red = sum(1 for player in matches if player.level == models.LEVEL_RED)
+        return ReplayQueryResult(
+            replay=detail,
+            matches=matches,
+            summary={"total": len(matches), "hits": hits, "id_hits": hits,
+                     "nickname_hits": 0, "yellow": yellow, "red": red},
+            message="命中 %d 人" % hits,
+        )
+
+    def fake_query(path):
+        # 在查询 worker 线程里执行：重跑时必须已释放更新 worker（不并发访问 SQLite）。
+        query_calls.append({
+            "path": str(path),
+            "bans": state["bans"],
+            "update_worker_running": window._worker_running(window._update_worker),
+        })
+        result = build_query_result(hits=1 if state["bans"] else 0)
+        first_query_done.set()
+        return result
+
+    def fake_update(force=False, progress_cb=None, cancel_cb=None):
+        # 首启真实的更新动作发生在用户看完弹窗②之后（此时扫描后的查询早已结束）；
+        # 这里等首次查询跑完，保证「命中 0 → 命中 1」时序确定、不依赖竞态。
+        assert first_query_done.wait(10), "首启更新前应先完成扫描后的首次查询"
+        state["bans"] = 1
+        return models.UpdateResult(ok=True, message="更新完成：新增 1 批")
+
+    asks = []
+
+    def fake_ask_update(error_message=""):
+        asks.append(error_message)
+        return True
+
+    monkeypatch.setattr(window, "_record_count", lambda: state["bans"])
+    monkeypatch.setattr(service, "query_replay", fake_query)
+    monkeypatch.setattr(service, "update_ban_list", fake_update)
+    monkeypatch.setattr(
+        service, "get_battle_stats",
+        lambda detail: BattleStatsResult(available=False, message="测试：跳过战绩请求"),
+    )
+    monkeypatch.setattr(service, "peek_player_stats_cache", lambda matched: None)
+    monkeypatch.setattr(window, "_ask_first_run_update", fake_ask_update)
+    try:
+        # 1) 模拟扫描结束：自动查询当前对局（此刻名单空 → 命中 0）
+        window._first_run_flow_active = False  # 先不让扫描结束入口弹窗②
+        window._on_scan_finished("all", replays)
+        assert wait_until(
+            qapp, lambda: window._query_worker is None and window._query_result is not None,
+            timeout_s=15), "扫描结束后的首次查询未完成"
+        assert len(query_calls) == 1, query_calls
+        assert "命中 0 人" in window.summary_label.text(), window.summary_label.text()
+
+        # 2) 首启流程弹窗②确认 → 名单更新成功 → 自动重跑当前对局查询
+        window._first_run_flow_active = True
+        window._after_scan_completed()
+        assert asks == [""], asks
+        assert wait_until(qapp, lambda: window._update_worker is None, timeout_s=15), \
+            "首启更新 worker 未结束"
+        assert wait_until(
+            qapp, lambda: len(query_calls) >= 2 and window._query_worker is None,
+            timeout_s=20), "首启更新成功后未自动重跑当前对局查询"
+        assert "命中 1 人" in window.summary_label.text(), window.summary_label.text()
+        assert window._query_result.summary["hits"] == 1
+        assert len(query_calls) == 2, "当前对局应只重跑一次（不重复/递归查询）"
+        assert query_calls[1]["bans"] == 1, query_calls
+        assert query_calls[1]["update_worker_running"] is False, \
+            "重跑查询时更新 worker 必须已释放（不并发访问 SQLite）"
+        assert window._first_run_update_active is False
+        assert window._meta_get(FIRST_RUN_FLOW_META_KEY) is True
+
+        # 3) 普通（非首启）更新成功不改变行为：不重跑对局查询（防回归）
+        window._on_update_finished(
+            True, models.UpdateResult(ok=True, message="更新完成：已是最新"))
+        settle(qapp)
+        assert len(query_calls) == 2, "普通更新不应重跑当前对局查询"
+    finally:
+        window.close()
+        service.dispose()

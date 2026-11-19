@@ -1091,11 +1091,40 @@ class MainWindow(QMainWindow):
                 self._show_status_message(
                     "首次使用完成：名单库已就绪（%s 条）"
                     % "{:,}".format(self._record_count()), 15000, force=True)
+                # P2 修复：扫描结束时的查询发生在名单库仍为空时（结果表「命中 0 人」），
+                # 首启更新成功后必须用新名单重跑当前对局查询，否则新用户第一眼会以为
+                # 工具坏了。singleShot(0) 延迟到更新 worker 释放后再查，避免并发访问 SQLite。
+                if QTimer is not None:
+                    QTimer.singleShot(0, self._refresh_current_replay_after_update)
+                else:
+                    self._refresh_current_replay_after_update()
         if not silent:
             if failed:
                 QMessageBox.warning(self, "更新名单失败", message)
             else:
                 QMessageBox.information(self, "更新名单", message)
+
+    def _refresh_current_replay_after_update(self, _retry: int = 0) -> None:
+        """首启名单更新成功后重跑当前对局查询（P2：避免结果表停留「命中 0 人」假象）。
+
+        扫描结束时先启动的那次查询，名单库仍为空 → 结果表/汇总显示「命中 0 人」；
+        首启名单更新成功后用新名单重跑一次当前选中对局，用户无需重选对局即可看到
+        「命中 X 人」。用 ``QTimer.singleShot(0)`` 延迟调度并等更新 / 查询 worker
+        释放后再触发：不与后台线程并发访问 SQLite，也不重复 / 递归查询。
+        **仅首启流程调用；普通 6h 定时更新路径行为不变。**
+        """
+        waiting = (self._worker_running(self._update_worker)
+                   or self._worker_running(self._query_worker))
+        if waiting:
+            if _retry < 50 and QTimer is not None:
+                QTimer.singleShot(
+                    100, partial(self._refresh_current_replay_after_update, _retry + 1))
+            return
+        index = self.replay_combo.currentIndex()
+        if index < 0 or index >= len(self._current_replays):
+            return
+        # 复用现有查询入口：刷新当前选中对局（重新匹配新名单并更新汇总「命中 X 人」）。
+        self._on_replay_index_changed(index)
 
     def _on_update_failed(self, silent: bool, message: str) -> None:
         self.progress_label.setText(message)
