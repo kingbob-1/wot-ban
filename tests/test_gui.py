@@ -5,15 +5,20 @@
 
 覆盖：
 - 业务门面：数据状态口径（去重入库 322,806 / 官方源 322,941）、mock 全流程、真实库读取；
-- **本轮界面契约**（task-3）：
+- **第一轮界面契约**（task-3）：
   1) 列顺序 / 标题逐字（24 列，删「命中率」「阵营」）；
   2) 本局战力四舍五入取整（half-up）；
   3) 红绿方上下分组（绿方 = 录像者本人所在队，不写死 team==1）、组头行跨列合并且不参与排序；
   4) 组内默认排序：封禁次数降序 -> 本局战力降序 -> 伤害降序（None 置后），表头点击只在组内改排序；
   5) 「查询结果」标题行胜负平 + 比分（含 partial 局异步到达）；
   6) 1920×1080 下 30 人（+2 组头）无垂直滚动条；60 人保留滚动条、视口约 30 名玩家；
-  7) 明细面板当局战绩新字段（坦克车名 / 阵营按本人队）+ 综合战绩缓存展示与「刷新综合战绩」按钮；
-  8) 过滤 / 底部「显示 X/Y 人」/ 数据状态等既有功能不回归。
+  7) 明细面板当局战绩新字段（坦克车名 / 阵营按本人队）+ 综合战绩缓存展示；
+  8) 过滤 / 底部「显示 X/Y 人」/ 数据状态等既有功能不回归；
+- **第二轮 UI 微调**（task-6）：
+  9) 查询结果区域（表格所有列 / 标题 / 筛选控件）无任何悬停提示；
+  10) 本人（录像者）行浅蓝底 + 昵称加粗，封禁黄 / 红底色优先；
+  11) 综合战绩只剩标题行右上角单个「刷新」按钮（force=True），非命中玩家也可点；
+  12) 「当前对局」文案与下拉条目补本人本局车名（只显示名称、绝不显示代码）。
 """
 import os
 import sys
@@ -30,7 +35,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import pytest  # noqa: E402
 from PySide6.QtCore import Qt  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QPushButton  # noqa: E402
 
 from src import models  # noqa: E402
 from src.config import Config, load_config  # noqa: E402
@@ -686,8 +691,8 @@ def test_detail_panel_new_fields_and_team(qapp):
     panel.deleteLater()
 
 
-def test_detail_panel_buttons_and_cached_stats(qapp):
-    """综合战绩：有缓存直接展示（含更新时间/缓存时间）；「刷新综合战绩」按钮存在。"""
+def test_detail_panel_single_refresh_button_and_cached_stats(qapp):
+    """综合战绩：只剩标题行右上角单个「刷新」按钮；缓存直接展示；非命中玩家也可点。"""
     from src.ui.widgets import PlayerDetailPanel
 
     panel = PlayerDetailPanel()
@@ -697,21 +702,26 @@ def test_detail_panel_buttons_and_cached_stats(qapp):
                                   records=[models.BanRecord(batch_day="2026-11-06",
                                                             nickname="kingbob_")])
     panel.set_player(player, {}, "ready", "", recorder_team=1)
-    assert panel.refresh_player_stats_button.text() == "刷新综合战绩"
-    assert panel.player_stats_button.isEnabled() and panel.refresh_player_stats_button.isEnabled()
+    # 第二轮反馈：合并为单个「刷新」按钮（放标题行右上角），旧两个按钮文案不再存在。
+    assert panel.refresh_player_stats_button.text() == "刷新"
+    assert panel.player_stats_button is panel.refresh_player_stats_button
+    assert panel.refresh_player_stats_button.isEnabled()
+    button_texts = [button.text() for button in panel.findChildren(QPushButton)]
+    assert "查看综合战绩" not in button_texts
+    assert "刷新综合战绩" not in button_texts
     # 有缓存直接展示：数据更新时间 / 缓存时间（标注「点刷新更新」）
     panel.show_player_stats(make_player_stats_result(), from_cache=True)
     meta = panel.player_stats_meta.text()
     assert "数据更新时间" in meta and "缓存于" in meta and "点刷新更新" in meta
     assert panel.player_values["combat_power"].text() == "5,100"
-    # 未命中玩家：按钮禁用
+    # 第二轮反馈：未命中玩家同样可点「刷新」（不再限制必须命中封禁名单）。
     panel.set_player(models.MatchedPlayer(nickname="路人", dbid=2, team=2), {}, "ready", "")
-    assert not panel.refresh_player_stats_button.isEnabled()
+    assert panel.refresh_player_stats_button.isEnabled()
     panel.deleteLater()
 
 
 def test_refresh_player_stats_uses_force(qapp, monkeypatch):
-    """「刷新综合战绩」强制 force=True；选中玩家不自动请求。"""
+    """「刷新」按钮点击走 force=True；选中玩家不自动请求；请求失败优雅提示。"""
     from src.ui.main_window import MainWindow
 
     service = make_mock_service()
@@ -736,18 +746,15 @@ def test_refresh_player_stats_uses_force(qapp, monkeypatch):
         window._select_first_player()
         settle(qapp)
         assert calls == [], "选中玩家不应自动请求综合战绩"
-        # 2) 查看（缓存优先，force=False）
         player = window.selected_player()
         assert player is not None
-        window._on_player_stats_requested(player)
+        assert window.detail_panel.refresh_player_stats_button.isEnabled()
+        # 2) 点击单个「刷新」按钮 -> force=True
+        window.detail_panel.refresh_player_stats_button.click()
         assert wait_until(qapp, lambda: window._player_stats_worker is None, timeout_s=10)
-        assert calls[-1]["force"] is False
+        assert calls and calls[-1]["force"] is True
         assert "缓存时间" in window.detail_panel.player_stats_meta.text()
-        # 3) 刷新（force=True）
-        window._on_player_stats_requested(player, force=True)
-        assert wait_until(qapp, lambda: window._player_stats_worker is None, timeout_s=10)
-        assert calls[-1]["force"] is True
-        # 4) 再次选中该玩家：直接展示缓存（不发新请求）
+        # 3) 再次选中该玩家：直接展示缓存（不发新请求）
         before = len(calls)
         window.table.selectRow(window.model.first_player_row())
         settle(qapp)
@@ -756,6 +763,251 @@ def test_refresh_player_stats_uses_force(qapp, monkeypatch):
     finally:
         window.close()
         service.dispose()
+
+
+def test_refresh_button_enabled_for_non_hit_player(qapp, monkeypatch):
+    """非命中玩家也可点「刷新」；数据层尚未放开时按返回中文提示优雅降级。"""
+    from src.app.service import PlayerStatsResult
+    from src.ui.main_window import MainWindow
+
+    service = make_mock_service()
+    calls = []
+
+    def fake_get_player_stats(player, force=False):
+        calls.append({"player": player, "force": force})
+        return PlayerStatsResult(
+            available=False,
+            message="该玩家未命中封禁名单，暂无法点查综合战绩（数据层限制）",
+        )
+
+    monkeypatch.setattr(service, "get_player_stats", fake_get_player_stats)
+    detail, matches = make_synthetic_replay(player_count=30)
+    window = MainWindow(service)
+    window.resize(TARGET_WINDOW_WIDTH, TARGET_WINDOW_HEIGHT)
+    window.show()
+    try:
+        settle(qapp)
+        window.stack.setCurrentIndex(1)
+        window.model.set_rows(matches, detail)
+        window._apply_filters()
+        settle(qapp)
+        # 选一名未命中玩家（构造数据全部 match_type=none）
+        non_hit_row = None
+        for row in window.model.player_rows():
+            candidate = window.model.row_object(row)
+            if candidate is not None and not candidate.is_hit:
+                non_hit_row = row
+                break
+        assert non_hit_row is not None
+        window.table.selectRow(non_hit_row)
+        settle(qapp)
+        button = window.detail_panel.refresh_player_stats_button
+        assert button.isEnabled(), "非命中玩家的「刷新」按钮也应可点"
+        button.click()
+        assert wait_until(qapp, lambda: window._player_stats_worker is None, timeout_s=10)
+        assert calls and calls[-1]["force"] is True
+        assert "未命中" in window.detail_panel.player_stats_meta.text()
+    finally:
+        window.close()
+        service.dispose()
+
+
+def test_query_result_area_has_no_tooltips(qapp):
+    """第二轮反馈：查询结果区域（表格所有列 + 标题 + 筛选控件）一律无悬停提示。"""
+    from src.ui.main_window import MainWindow
+    from src.ui.table_model import STATS_STATE_READY
+
+    detail, matches = make_synthetic_replay(player_count=30)
+    stats_map = make_stats_map(
+        matches,
+        {player.nickname: {"combat": 500 + index, "damage": 1000 + index}
+         for index, player in enumerate(matches)},
+    )
+    model = _make_model()
+    model.set_rows(matches, detail)
+    model.set_stats(STATS_STATE_READY, stats_map)
+    for row in range(model.rowCount()):
+        for column in range(model.columnCount()):
+            tooltip = model.data(model.index(row, column), Qt.ItemDataRole.ToolTipRole)
+            assert tooltip in (None, ""), "第 %d 行第 %d 列仍有悬停提示：%r" % (
+                row, column, tooltip)
+    # 主窗口「查询结果」卡片内控件同样无 tooltip；顶栏按钮 / 明细面板 tooltip 保留。
+    service = make_mock_service()
+    window = MainWindow(service)
+    window.resize(TARGET_WINDOW_WIDTH, TARGET_WINDOW_HEIGHT)
+    window.show()
+    try:
+        settle(qapp)
+        assert window.result_title.toolTip() == ""
+        assert window.id_only_check.toolTip() == ""
+        assert window.hits_only_check.toolTip() == ""
+        assert window.level_combo.toolTip() == ""
+        assert window.table.toolTip() == ""
+        assert window.count_label.toolTip() == ""
+        assert window.summary_label.toolTip() == ""
+        # 顶栏按钮 tooltip 保留（不在「查询结果」区域内）
+        assert window.update_button.toolTip() and window.data_status_button.toolTip()
+        # 明细面板 tooltip 保留
+        assert window.detail_panel.player_title.toolTip()
+        assert window.detail_panel.refresh_player_stats_button.toolTip()
+    finally:
+        window.close()
+        service.dispose()
+
+
+def test_recorder_row_highlight_and_nickname_bold(qapp):
+    """本人（录像者）行浅蓝底 + 昵称加粗；封禁黄/红底色优先且不被盖掉。"""
+    from src.ui import theme
+    from src.ui.table_model import STATS_STATE_READY
+
+    detail, matches = make_synthetic_replay(player_count=30, recorder_index=25)  # team 2
+    # 构造：本人未命中 -> 浅蓝底；另两名命中玩家 -> 黄 / 红底优先。
+    matches[0].ban_count = 1
+    matches[0].level = models.LEVEL_YELLOW
+    matches[0].records = [models.BanRecord(batch_day="2026-11-06", nickname=matches[0].nickname)]
+    matches[1].ban_count = 2
+    matches[1].level = models.LEVEL_RED
+    matches[1].records = [models.BanRecord(batch_day="2026-11-06", nickname=matches[1].nickname)]
+    model = _make_model()
+    model.set_rows(matches, detail)
+    model.set_stats(STATS_STATE_READY, {})
+    recorder = matches[25]
+    assert model.is_recorder(recorder) and model.recorder_team() == 2
+    row_of = {model.row_object(row).nickname: row for row in model.player_rows()}
+    recorder_row = row_of[recorder.nickname]
+    assert model.is_recorder_row(recorder_row)
+    bg = model.data(model.index(recorder_row, 0), Qt.ItemDataRole.BackgroundRole)
+    assert bg is not None and bg.name().lower() == theme.COLOR_RECORDER_BG
+    nickname_font = model.data(model.index(recorder_row, 0), Qt.ItemDataRole.FontRole)
+    assert nickname_font is not None and nickname_font.bold()
+    # 非本人、未命中玩家：无底色、昵称不加粗
+    other_row = row_of[matches[2].nickname]
+    assert not model.is_recorder_row(other_row)
+    assert model.data(model.index(other_row, 0), Qt.ItemDataRole.BackgroundRole) is None
+    assert model.data(model.index(other_row, 0), Qt.ItemDataRole.FontRole) is None
+    # 封禁黄 / 红底优先级更高
+    yellow_bg = model.data(model.index(row_of[matches[0].nickname], 0),
+                           Qt.ItemDataRole.BackgroundRole)
+    assert yellow_bg is not None and yellow_bg.name().lower() == theme.COLOR_YELLOW_BG
+    red_bg = model.data(model.index(row_of[matches[1].nickname], 0),
+                        Qt.ItemDataRole.BackgroundRole)
+    assert red_bg is not None and red_bg.name().lower() == theme.COLOR_RED_BG
+    # 本人若命中封禁：黄底优先于浅蓝底，但昵称仍加粗
+    matches[25].ban_count = 1
+    matches[25].level = models.LEVEL_YELLOW
+    matches[25].records = [models.BanRecord(batch_day="2026-11-06",
+                                            nickname=matches[25].nickname)]
+    model.set_rows(matches, detail)
+    row_of = {model.row_object(row).nickname: row for row in model.player_rows()}
+    recorder_row = row_of[matches[25].nickname]
+    bg = model.data(model.index(recorder_row, 0), Qt.ItemDataRole.BackgroundRole)
+    assert bg is not None and bg.name().lower() == theme.COLOR_YELLOW_BG
+    font = model.data(model.index(recorder_row, 0), Qt.ItemDataRole.FontRole)
+    assert font is not None and font.bold()
+
+
+def test_selection_does_not_cover_ban_background(qapp):
+    """选中行用半透明叠加：封禁黄底在选中后仍可见（不被整块选中蓝盖掉）。"""
+    from src.ui import theme
+    from src.ui.main_window import ResultRowDelegate
+    from src.ui.table_model import STATS_STATE_READY
+
+    detail, matches = make_synthetic_replay(player_count=30, recorder_index=25)
+    matches[0].ban_count = 1
+    matches[0].level = models.LEVEL_YELLOW
+    matches[0].records = [models.BanRecord(batch_day="2026-11-06", nickname=matches[0].nickname)]
+    window = make_window()
+    try:
+        settle(qapp)
+        window.stack.setCurrentIndex(1)
+        window.model.set_rows(matches, detail)
+        window.model.set_stats(STATS_STATE_READY, {})
+        settle(qapp)
+        assert isinstance(window.table.itemDelegate(), ResultRowDelegate)
+        row_of = {window.model.row_object(row).nickname: row
+                  for row in window.model.player_rows()}
+        yellow_row = row_of[matches[0].nickname]
+        window.table.selectRow(yellow_row)
+        settle(qapp)
+        rect = window.table.visualRect(window.model.index(yellow_row, 3))
+        image = window.table.viewport().grab().toImage()
+        color = image.pixelColor(rect.x() + rect.width() - 3, rect.y() + 3)
+        # 半透明主色叠加在封禁黄 (#fff3c4) 上约为 (216,217,203)；不应变成纯选中蓝 #dbeafe。
+        expected = (216, 217, 203)
+        actual = (color.red(), color.green(), color.blue())
+        assert all(abs(value - want) <= 10 for value, want in zip(actual, expected)), \
+            "选中行盖掉了封禁黄底：%s %s" % (color.name(), actual)
+        # 本人行未选中时保持浅蓝底
+        recorder_row = row_of[matches[25].nickname]
+        recorder_bg = window.model.data(window.model.index(recorder_row, 0),
+                                        Qt.ItemDataRole.BackgroundRole)
+        assert recorder_bg is not None
+        assert recorder_bg.name().lower() == theme.COLOR_RECORDER_BG
+    finally:
+        window.close()
+
+
+def test_current_replay_label_contains_recorder_vehicle(qapp):
+    """「当前对局」文案在时间/地图后插入本人本局车名（只显示名称、绝不显示代码）。"""
+    from src.ui.main_window import MainWindow
+
+    pytest.importorskip("src.game_names")
+    detail, _matches = make_synthetic_replay(player_count=30, map_name="99_poland",
+                                             map_display_name=None)
+    detail.block_count = 1  # partial 局
+    label = MainWindow._localized_replay_label(detail)
+    assert "斯杜季昂奇" in label and "五式重战" in label
+    assert "partial（未打完）" in label
+    assert label.index("斯杜季昂奇") < label.index("五式重战") < label.index("partial（未打完）")
+    for code in ("99_poland", "japan", "J20"):
+        assert code not in label, "当前对局不得显示车辆/地图代码：%r" % label
+    # 主窗口下拉文案：查询完成后同样补车名
+    window = make_window()
+    try:
+        settle(qapp)
+        window.replay_combo.clear()
+        window.replay_combo.addItem("占位", detail.file_path)
+        window.replay_combo.setCurrentIndex(0)
+        window._refresh_current_replay_label(detail)
+        text = window.replay_combo.currentText()
+        assert "斯杜季昂奇" in text and "五式重战" in text
+        for code in ("99_poland", "japan", "J20"):
+            assert code not in text
+    finally:
+        window.close()
+    # 车名映射失败 -> 省略该项，绝不显示原始代码
+    detail.players[0].tank = "ussr:NOT_A_REAL_TANK"
+    label_failed = MainWindow._localized_replay_label(detail)
+    assert "NOT_A_REAL_TANK" not in label_failed and "ussr" not in label_failed
+    assert "五式重战" not in label_failed
+
+
+def test_combo_items_include_vehicle_from_filename(qapp):
+    """下拉列表条目：从录像文件名提取车辆代码映射车名；失败不加且绝不显示代码。"""
+    from src.ui.main_window import MainWindow
+
+    pytest.importorskip("src.game_names")
+    info = models.ReplayInfo(
+        path=r"X:\replays\20261115_0108_japan-J20_Type_2605_99_poland.wotreplay",
+        battle_time="2026-11-15T01:08:00+08:00",
+        map_name="99_poland",
+        block_count=1,
+        player_count=30,
+    )
+    label = MainWindow._localized_replay_label(info)
+    assert "斯杜季昂奇" in label and "五式重战" in label
+    assert "99_poland" not in label and "japan" not in label
+    # 无法可靠提取（mock 风格文件名 / 非代码地图）时不加车名、不显示代码
+    unknown = models.ReplayInfo(
+        path=r"X:\tmp\20261117_201400_CN_锡默尔斯多夫.wotreplay",
+        battle_time="2026-11-17T20:14:00+08:00",
+        map_name="锡默尔斯多夫",
+        block_count=2,
+        player_count=30,
+    )
+    label_unknown = MainWindow._localized_replay_label(unknown)
+    assert "五式重战" not in label_unknown
+    assert "CN" not in label_unknown
 
 
 def test_select_player_uses_peek_cache_without_request(qapp, monkeypatch):
@@ -911,7 +1163,9 @@ def test_main_window_mock_flow(qapp):
     # F4：综合战绩口径标注（偶游盒子 · 最近 1500 场标准局）
     assert "1500" in detail.player_title.text() and "偶游盒子" in detail.player_title.text()
     assert "1500" in detail.player_stats_button.toolTip()
-    assert detail.refresh_player_stats_button.text() == "刷新综合战绩"
+    # 第二轮反馈：两个按钮合并为标题行右上角单个「刷新」
+    assert detail.refresh_player_stats_button.text() == "刷新"
+    assert detail.player_stats_button is detail.refresh_player_stats_button
     # v0.3：明细面板不再显示「点击口径 / 来源 battledetail」提示行
     assert not hasattr(detail, "player_hint") and not hasattr(detail, "battle_hint")
 

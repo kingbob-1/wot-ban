@@ -20,7 +20,7 @@ from typing import Any, Optional
 
 try:
     from PySide6.QtCore import Qt, QTimer, QUrl
-    from PySide6.QtGui import QDesktopServices, QFont, QFontMetrics, QGuiApplication, QIcon
+    from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontMetrics, QGuiApplication, QIcon
     from PySide6.QtWidgets import (
         QAbstractItemView,
         QApplication,
@@ -38,6 +38,9 @@ try:
         QPushButton,
         QSplitter,
         QStackedWidget,
+        QStyle,
+        QStyledItemDelegate,
+        QStyleOptionViewItem,
         QTableView,
         QVBoxLayout,
         QWidget,
@@ -45,6 +48,8 @@ try:
 except ImportError:  # 便于无 PySide6 环境下静态检查
     Qt = QApplication = QMainWindow = QWidget = QFrame = object  # type: ignore[assignment]
     QTimer = QUrl = QDesktopServices = QIcon = QFont = QFontMetrics = None  # type: ignore[assignment]
+    QColor = QStyle = QStyleOptionViewItem = None  # type: ignore[assignment]
+    QStyledItemDelegate = object  # type: ignore[assignment]
 
 try:
     from ..app.service import (
@@ -115,6 +120,31 @@ WORKER_ATTR_NAMES = (
     "_library_worker",
     "_env_worker",
 )
+
+
+class ResultRowDelegate(QStyledItemDelegate):
+    """结果表行委托：选中行叠加半透明主色，保留模型背景色（封禁黄/红、本人浅蓝）。
+
+    Qt 默认选中高亮会整块盖掉 ``BackgroundRole``；这里把 ``State_Selected`` 从基类
+    绘制选项中移除（底纹仍按模型背景色绘制），再叠加一层半透明蓝作为选中提示，
+    从而「选中不盖掉封禁红黄底色 / 本人行浅蓝底色」（第二轮反馈）。
+    """
+
+    SELECTION_ALPHA = 46  # 半透明叠加（0-255），既可见选中又不遮底色
+
+    def paint(self, painter: Any, option: Any, index: Any) -> None:
+        if QStyleOptionViewItem is None:
+            return
+        opt = QStyleOptionViewItem(option)
+        # 按普通行绘制：底纹来自 model.BackgroundRole（封禁黄/红 / 本人浅蓝）。
+        opt.state = opt.state & ~QStyle.StateFlag.State_Selected
+        super().paint(painter, opt, index)
+        if QColor is not None and (option.state & QStyle.StateFlag.State_Selected):
+            tint = QColor(theme.COLOR_ACCENT)
+            tint.setAlpha(self.SELECTION_ALPHA)
+            painter.save()
+            painter.fillRect(option.rect, tint)
+            painter.restore()
 
 
 def application_icon_path(cfg: Any = None) -> Optional[Path]:
@@ -354,14 +384,12 @@ class MainWindow(QMainWindow):
         filter_row = QHBoxLayout()
         filter_row.setSpacing(10)
         # 「查询结果」标题行：异步战绩到达后追加「· 平局 14v6」并染色（需求 4）。
+        # 第二轮用户反馈：查询结果区域（标题 / 筛选控件 / 表格）一律不设悬停提示。
         self.result_title = QLabel(RESULT_TITLE_BASE)
         self.result_title.setObjectName("SectionTitle")
-        self.result_title.setToolTip("本局胜负平来自偶游盒子当局战绩（异步加载）；录像本身不包含比分")
         filter_row.addWidget(self.result_title)
         self.id_only_check = QCheckBox("仅看 ID 命中")
-        self.id_only_check.setToolTip("只显示完整录像 dbid 与名单 wgid 精确匹配的玩家（A2 口径下默认不启用）")
         self.hits_only_check = QCheckBox("只看命中")
-        self.hits_only_check.setToolTip("只显示命中历史封禁名单的玩家")
         filter_row.addWidget(self.id_only_check)
         filter_row.addWidget(self.hits_only_check)
         filter_row.addWidget(QLabel("标色"))
@@ -397,6 +425,8 @@ class MainWindow(QMainWindow):
 
         self.table = QTableView()
         self.table.setObjectName("ResultTable")
+        # 选中行半透明叠加：不盖掉封禁黄/红底色与本人行浅蓝底色。
+        self.table.setItemDelegate(ResultRowDelegate(self.table))
         self.table.setModel(self.model)
         self.table.setSortingEnabled(True)
         self.table.setAlternatingRowColors(True)
@@ -509,8 +539,7 @@ class MainWindow(QMainWindow):
         self.table.selectionModel().currentRowChanged.connect(self._on_current_row_changed)
         # 模型行结构变化（查询 / 筛选 / 战绩到达后重排）后重新跨列合并组头行。
         self.model.modelReset.connect(self._apply_group_spans)
-        if self.detail_panel.player_stats_requested is not None:
-            self.detail_panel.player_stats_requested.connect(self._on_player_stats_requested)
+        # 第二轮反馈：综合战绩只剩一个「刷新」按钮（force_refresh=True）。
         if self.detail_panel.player_stats_refresh_requested is not None:
             self.detail_panel.player_stats_refresh_requested.connect(
                 partial(self._on_player_stats_requested, force=True)
@@ -1117,38 +1146,133 @@ class MainWindow(QMainWindow):
             if self.model.is_group_row(row):
                 self.table.setSpan(row, 0, 1, column_count)
 
+    # ------------------------------------------------------------ 地图 / 车名辅助
     @staticmethod
-    def _localized_map_name(code: Any) -> str:
+    def _game_names_module() -> Any:
+        """惰性导入 ``src.game_names``；模块未交付 / 导入失败返回 None（绝不抛异常）。"""
+        try:
+            from .. import game_names  # type: ignore[attr-defined]
+
+            return game_names
+        except Exception:  # noqa: BLE001 - 模块未交付时优雅降级
+            try:
+                from src import game_names  # type: ignore[attr-defined]
+
+                return game_names
+            except Exception:  # noqa: BLE001
+                return None
+
+    @classmethod
+    def _game_vehicle_name(cls, tank_code: Any) -> str:
+        """录像 tank 代码 -> 游戏车名；映射失败返回空串（**绝不回退显示代码**）。"""
+        if not tank_code:
+            return ""
+        module = cls._game_names_module()
+        if module is None:
+            return ""
+        try:
+            name = module.vehicle_name(str(tank_code))
+        except Exception:  # noqa: BLE001 - 映射失败不影响界面
+            return ""
+        return str(name) if name else ""
+
+    @classmethod
+    def _localized_map_name(cls, code: Any) -> str:
         """地图代码 -> 游戏中文名；映射模块缺失 / 无结果时原样返回（不显示报错）。"""
         if not code:
             return ""
         text = str(code)
+        module = cls._game_names_module()
+        if module is None:
+            return text
         try:
-            from .. import game_names  # type: ignore[attr-defined]
-        except Exception:  # noqa: BLE001 - 模块未交付时优雅降级
-            try:
-                from src import game_names  # type: ignore[attr-defined]
-            except Exception:  # noqa: BLE001
-                return text
-        try:
-            name = game_names.map_name(text)
+            name = module.map_name(text)
         except Exception:  # noqa: BLE001 - 映射失败不影响界面
             return text
         return str(name) if name else text
 
-    def _localized_replay_label(self, replay: Any) -> str:
-        """录像下拉文案：优先 detail.map_display_name，其次 game_names 中文名兜底。"""
+    @classmethod
+    def _recorder_vehicle_name(cls, detail: Any) -> str:
+        """录像者本局车名：players 按 recorder_dbid 优先、recorder_name 兜底反查 tank。
+
+        仅返回 ``game_names.vehicle_name()`` 映射出的名称；映射失败返回空串，
+        调用方必须省略该项而不是显示原始代码。
+        """
+        if detail is None:
+            return ""
+        players = list(getattr(detail, "players", None) or [])
+        recorder_dbid = getattr(detail, "recorder_dbid", None)
+        recorder_name = getattr(detail, "recorder_name", None)
+        tank = None
+        if recorder_dbid is not None:
+            for player in players:
+                dbid = getattr(player, "dbid", None)
+                if dbid is not None and int(dbid) == int(recorder_dbid):
+                    tank = getattr(player, "tank", None)
+                    break
+        if tank is None and recorder_name:
+            for player in players:
+                if getattr(player, "nickname", None) == recorder_name:
+                    tank = getattr(player, "tank", None)
+                    break
+        return cls._game_vehicle_name(tank)
+
+    @classmethod
+    def _vehicle_name_from_replay_path(cls, path: Any) -> str:
+        """从录像文件名提取车辆代码 -> 车名（下拉列表 ReplayInfo 无解析结果时用）。
+
+        文件名形如 ``20261115_0108_japan-J20_Type_2605_99_poland.wotreplay``；
+        车辆代码与地图代码都可能含下划线，因此只在「车辆代码可映射 **且** 地图代码
+        可映射」的切分点取车名；提取 / 映射失败返回空串（绝不显示代码）。
+        """
+        if not path:
+            return ""
+        file_name = Path(str(path)).name
+        if not file_name.lower().endswith(".wotreplay"):
+            return ""
+        stem = file_name[: -len(".wotreplay")]
+        parts = stem.split("_")
+        if len(parts) < 4:
+            return ""
+        module = cls._game_names_module()
+        if module is None:
+            return ""
+        rest = parts[2:]  # 前两段是日期 / 时间
+        for split in range(1, len(rest)):
+            code = "_".join(rest[:split])
+            map_code = "_".join(rest[split:])
+            try:
+                vehicle = module.vehicle_name(code)
+                map_ok = module.map_name(map_code)
+            except Exception:  # noqa: BLE001 - 映射失败按无法提取处理
+                return ""
+            if vehicle and map_ok:
+                return str(vehicle)
+        return ""
+
+    @classmethod
+    def _localized_replay_label(cls, replay: Any) -> str:
+        """录像下拉文案：中文地图名 + 本人本局车名（只显示名称，绝不显示代码）。"""
         if replay is None:
             return ""
         base = replay_label(replay)
         raw = getattr(replay, "map_name", None)
-        display = getattr(replay, "map_display_name", None) or self._localized_map_name(raw)
+        display = getattr(replay, "map_display_name", None) or cls._localized_map_name(raw)
+        marker = str(display) if display else (str(raw) if raw else "未知地图")
         if raw and display and str(display) != str(raw):
             base = base.replace(str(raw), str(display), 1)
+        # 车名：有解析结果（players）时按录像者反查；ReplayInfo 从文件名提取。
+        vehicle = cls._recorder_vehicle_name(replay) or cls._vehicle_name_from_replay_path(
+            getattr(replay, "path", None)
+        )
+        if vehicle:
+            anchor = "%s · " % marker
+            if anchor in base:
+                base = base.replace(anchor, "%s · %s · " % (marker, vehicle), 1)
         return base
 
     def _refresh_current_replay_label(self, detail: Any) -> None:
-        """查询完成后用 detail 的地图中文名刷新「当前对局」下拉文案（需求 5）。"""
+        """查询完成后刷新「当前对局」文案：中文地图名 + 本人本局车名。"""
         if detail is None:
             return
         index = self.replay_combo.currentIndex()

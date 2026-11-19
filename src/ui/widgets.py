@@ -259,8 +259,9 @@ BATTLE_FIELDS = [
     ("defense_points", "保卫基地防御点数"),
     ("mileage", "行驶里程"),
 ]
-# 每行展示 3 组「字段名 + 值」，紧凑多列（右侧面板宽度有限）。
-BATTLE_FIELDS_PER_ROW = 3
+# 每行展示 2 组「字段名 + 值」：紧凑多列，同时保证长车名（如「E-100坦克歼击车」）
+# 不会把明细面板撑出横向滚动条（否则标题行右上角「刷新」按钮会被挤出可视区）。
+BATTLE_FIELDS_PER_ROW = 2
 
 
 class PlayerDetailPanel(QWidget):
@@ -271,11 +272,10 @@ class PlayerDetailPanel(QWidget):
       击伤敌方战车 / 击毁敌方战车 / 协助盟友造成伤害 / 占领敌方基地点数 /
       保卫基地防御点数 / 行驶里程），坦克显示游戏车名；
     - 阵营按「绿方 = 录像者本人所在队」口径展示；
-    - 综合战绩：选中玩家只展示已缓存结果（不发请求），「查看综合战绩」按缓存优先
-      手动点查、「刷新综合战绩」强制刷新（force_refresh=True）。
+    - 综合战绩：选中玩家只展示已缓存结果（只读 peek，零网络）；标题行右上角单个
+      「刷新」按钮手动强制刷新（force_refresh=True），任意选中玩家均可点击。
     """
 
-    player_stats_requested = Signal(object) if Signal is not None else None
     player_stats_refresh_requested = Signal(object) if Signal is not None else None
 
     def __init__(self, parent: Any = None) -> None:
@@ -417,36 +417,33 @@ class PlayerDetailPanel(QWidget):
         battle_layout.addLayout(self.battle_grid)
         layout.addWidget(battle_card)
 
-        # 综合战绩（缓存优先展示 + 手动查看 / 刷新）
+        # 综合战绩（缓存优先展示 + 标题行右上角单个「刷新」按钮）
         player_card = QFrame()
         player_card.setObjectName("Card")
         player_layout = QVBoxLayout(player_card)
         player_layout.setContentsMargins(14, 12, 14, 12)
         player_layout.setSpacing(8)
-        player_title = QLabel("综合战绩（偶游盒子 · 近 1500 场 · 仅供参考）")
+        title_row = QHBoxLayout()
+        title_row.setSpacing(6)
+        # 标题单行（口径细节放 tooltip），给右上角「刷新」按钮留出稳定位置。
+        player_title = QLabel("综合战绩（偶游盒子 · 近 1500 场）")
         player_title.setObjectName("SectionTitle")
-        player_title.setWordWrap(True)
+        player_title.setWordWrap(False)
         player_title.setToolTip("数据口径：%s。盒子 index 为近 1500 场标准局统计，非官方数据。" % PLAYER_STATS_SCOPE)
         self.player_title = player_title
-        player_layout.addWidget(player_title)
-        button_row = QHBoxLayout()
-        button_row.setSpacing(6)
-        self.player_stats_button = QPushButton("查看综合战绩")
-        self.player_stats_button.setObjectName("Ghost")
-        self.player_stats_button.setEnabled(False)
-        self.player_stats_button.setToolTip(
-            "查看综合战绩（缓存优先，未命中才点查）：%s（≥2 秒限流、按自然日缓存）" % PLAYER_STATS_SCOPE
-        )
-        self.refresh_player_stats_button = QPushButton("刷新综合战绩")
+        # 第二轮反馈：合并为单个「刷新」按钮，放标题行右上角（不再单独一行）。
+        self.refresh_player_stats_button = QPushButton("刷新")
         self.refresh_player_stats_button.setObjectName("Ghost")
         self.refresh_player_stats_button.setEnabled(False)
         self.refresh_player_stats_button.setToolTip(
             "强制刷新综合战绩（force_refresh=True，忽略当日缓存重新点查）：%s" % PLAYER_STATS_SCOPE
         )
-        button_row.addWidget(self.player_stats_button)
-        button_row.addWidget(self.refresh_player_stats_button)
-        button_row.addStretch(1)
-        player_layout.addLayout(button_row)
+        # 兼容旧引用（截图 / 自检脚本）：旧「查看综合战绩」按钮已合并，别名指向同一个刷新按钮。
+        self.player_stats_button = self.refresh_player_stats_button
+        title_row.addWidget(player_title)
+        title_row.addStretch(1)
+        title_row.addWidget(self.refresh_player_stats_button)
+        player_layout.addLayout(title_row)
         self.player_stats_meta = QLabel("")
         self.player_stats_meta.setObjectName("StatsHint")
         self.player_stats_meta.setWordWrap(True)
@@ -471,14 +468,9 @@ class PlayerDetailPanel(QWidget):
         layout.addWidget(player_card)
         layout.addStretch(1)
 
-        self.player_stats_button.clicked.connect(self._on_player_stats_clicked)
         self.refresh_player_stats_button.clicked.connect(self._on_player_stats_refresh_clicked)
 
     # ------------------------------------------------------------ 交互
-    def _on_player_stats_clicked(self) -> None:
-        if self._player is not None and self.player_stats_requested is not None:
-            self.player_stats_requested.emit(self._player)
-
     def _on_player_stats_refresh_clicked(self) -> None:
         if self._player is not None and self.player_stats_refresh_requested is not None:
             self.player_stats_refresh_requested.emit(self._player)
@@ -499,7 +491,6 @@ class PlayerDetailPanel(QWidget):
         for label in self.battle_values.values():
             label.setText("—")
         self._reset_player_stats()
-        self.player_stats_button.setEnabled(False)
         self.refresh_player_stats_button.setEnabled(False)
         theme.set_badge(self.match_badge, "—", "none")
         theme.set_badge(self.level_badge, "未命中", "none")
@@ -540,8 +531,9 @@ class PlayerDetailPanel(QWidget):
         self._fill_records(player)
         self._fill_battle(player, stats_map, stats_state)
         self._reset_player_stats()
-        self.player_stats_button.setEnabled(bool(player.is_hit))
-        self.refresh_player_stats_button.setEnabled(bool(player.is_hit))
+        # 第二轮反馈：任意选中玩家都可点「刷新」（不再限制必须命中封禁名单）；
+        # 未命中玩家的请求若被数据层拒绝，界面按返回的中文提示优雅展示。
+        self.refresh_player_stats_button.setEnabled(True)
 
     def _fill_records(self, player: Any) -> None:
         records = list(player.records or [])

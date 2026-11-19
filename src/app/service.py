@@ -1507,11 +1507,21 @@ class AppService:
 
     # ------------------------------------------------------------ 综合战绩
     def get_player_stats(self, matched: models.MatchedPlayer, force: bool = False) -> PlayerStatsResult:
-        """点查某玩家综合战绩（A7：仅点查、限流与缓存由 stats 模块负责）。"""
+        """点查某玩家综合战绩（任意选中玩家都可查；A7：仅点查、限流与缓存由 stats 模块负责）。
+
+        查询口径（不再要求命中封禁名单）：
+        - 有 ``dbid`` → 按 account_id 查询（缓存/限流口径不变）；
+        - 无 ``dbid``（partial 局昵称可识别）→ 按 ``nickname`` 查盒子 index 页（pn）；
+        - 两者都没有 → 返回中文提示「该玩家缺少账号信息，无法查询综合战绩」。
+        ``force=True`` 供界面「刷新综合战绩」按钮强制跳过缓存。
+        """
         if matched is None:
             return PlayerStatsResult(available=False, message="请先选择一名玩家")
-        if not getattr(matched, "is_hit", False):
-            return PlayerStatsResult(available=False, message="该玩家未命中封禁名单，无需点查综合战绩")
+        dbid = getattr(matched, "dbid", None)
+        nickname = str(getattr(matched, "nickname", None) or "").strip()
+        if dbid is None and not nickname:
+            return PlayerStatsResult(
+                available=False, message="该玩家缺少账号信息，无法查询综合战绩")
         if self._mock:
             stats = mock_data.build_player_stats(matched)
             return PlayerStatsResult(
@@ -1527,19 +1537,20 @@ class AppService:
             "config": self.cfg,
             "cfg": self.cfg,
             "conn": self._thread_conn(),
-            "account_id": matched.dbid,
-            "dbid": matched.dbid,
-            "pid": matched.dbid,
-            "nickname": matched.nickname,
-            "pn": matched.nickname,
+            "account_id": dbid,
+            "dbid": dbid,
+            "pid": dbid,
+            "nickname": nickname or None,
+            "pn": nickname or None,
             "force_refresh": force,
             "force": force,
         }
         client = self._make_box_client(module, kwargs)
         cache_get = getattr(client, "_cache_get_player_stats", None) if client is not None else None
         # 缓存口径由 stats 模块负责（默认同自然日命中）；手动刷新（force=True）跳过缓存。
-        if not force and callable(cache_get) and matched.dbid:
-            cached = _call_adaptive(cache_get, account_id=int(matched.dbid))
+        # 缓存按 account_id 存，因此仅 dbid 查询走缓存预检；partial 局按昵称查询时无缓存可读。
+        if not force and callable(cache_get) and dbid is not None:
+            cached = _call_adaptive(cache_get, account_id=int(dbid))
             if cached is not None:
                 return PlayerStatsResult(
                     stats=cached,
@@ -1567,11 +1578,12 @@ class AppService:
         stats = self._normalize_player_stats(raw, matched)
         if stats is None:
             return PlayerStatsResult(available=False, message="综合战绩暂不可用（接口返回异常）")
-        return PlayerStatsResult(
-            stats=stats,
-            available=True,
-            message="数据来自偶游盒子 index（最近 1500 场标准局口径，仅供参考、非官方数据）",
-        )
+        if dbid is None:
+            message = ("数据来自偶游盒子 index（按昵称查询；最近 1500 场标准局口径，"
+                       "仅供参考、非官方数据）")
+        else:
+            message = "数据来自偶游盒子 index（最近 1500 场标准局口径，仅供参考、非官方数据）"
+        return PlayerStatsResult(stats=stats, available=True, message=message)
 
     def peek_player_stats_cache(self, matched: models.MatchedPlayer) -> Optional[PlayerStatsResult]:
         """只读本地缓存的玩家综合战绩（界面选中玩家时调用，**零网络**）。
@@ -1579,6 +1591,7 @@ class AppService:
         - 有缓存（即使跨天过期）→ 返回 ``PlayerStatsResult(available=True)``，message
           带缓存时间，提示点「刷新综合战绩」更新；
         - 无缓存 / 无 dbid / 战绩模块不可用 → 返回 ``None``；
+        - **不要求命中封禁名单**（未命中玩家只要 dbid 有缓存同样可 peek）；
         - 不 sleep、不发请求、不触发熔断；刷新由界面手动按钮走 ``get_player_stats(force=True)``。
         """
         if matched is None:

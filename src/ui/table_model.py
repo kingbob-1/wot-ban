@@ -12,10 +12,15 @@
   插入组头行（视图跨列合并，不参与排序）；60 人对局同样两组；
 - **默认排序（组内）**：封禁次数降序 -> 本局战力降序 -> 伤害降序（None 置后）；
   表头点击只在组内改排序，组头 / 组顺序不动；
+- **本人（录像者）行高亮**：录像者身份与 ``resolve_recorder_team`` 同源
+  （``ReplayDetail.recorder_dbid`` 优先、``recorder_name`` 兜底），本人行加浅蓝底
+  （``theme.COLOR_RECORDER_BG``，复用既有颜色）、昵称列加粗；封禁黄 / 红底色优先，
+  不覆盖封禁标色；
 - 黄底（1 次封禁）/ 红底（≥2 次封禁）由 ``BackgroundRole`` 提供；组头行用
   绿 / 红浅底 + 加粗；
 - 当局战绩列由 ``set_stats()`` 填充，缺失字段显示「—」，加载中显示「…」；
-- 「仅看 ID 命中」「只看命中」「黄/红筛选」在模型内过滤（模型行 = 可见行）。
+- 「仅看 ID 命中」「只看命中」「黄/红筛选」在模型内过滤（模型行 = 可见行）；
+- **不提供任何 ToolTipRole**（第二轮反馈：查询结果区域全部悬停提示已删除）。
 """
 from __future__ import annotations
 
@@ -35,9 +40,11 @@ except ImportError:  # 便于无 PySide6 环境下静态检查
 
 try:
     from .. import models
+    from . import theme
 except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from src import models
+    from src.ui import theme
 
 # 列定义：key / 表头 / 默认宽度 / 对齐。
 # 宽度按 1920×1080 默认窗口（右侧明细约 26%）压缩：7.5pt 字体下 24 列表头逐字完整、
@@ -70,7 +77,7 @@ COLUMNS = [
 ]
 COLUMN_INDEX = {item["key"]: index for index, item in enumerate(COLUMNS)}
 
-# 需要当局战绩数据的列（用于 tooltip / 排序取值）。
+# 需要当局战绩数据的列（用于排序取值）。
 STATS_KEYS = (
     "combat", "xp", "shots", "piercings", "damage", "hits_received",
     "potential_damage", "damage_blocked", "spotted", "vehicles_damaged",
@@ -104,13 +111,6 @@ MATCH_LABEL_ID = "ID 确认"
 MATCH_LABEL_NICKNAME = "昵称匹配"
 MATCH_LABEL_PARTIAL = "仅昵称匹配"
 MATCH_LABEL_NONE = "—"
-
-TOOLTIPS = {
-    MATCH_LABEL_ID: "完整录像账号 ID（dbid）与名单 wgid 精确匹配，可信度最高",
-    MATCH_LABEL_NICKNAME: "名单记录无账号 ID：按「同昵称视为同一人」归集（A2），可能受改名影响",
-    MATCH_LABEL_PARTIAL: "partial 录像（未打完）没有其他玩家账号 ID，只能按昵称匹配（A2/Q4，计入黄红）",
-    MATCH_LABEL_NONE: "未命中任何历史封禁记录",
-}
 
 
 # ---------------------------------------------------------------- 格式化工具
@@ -245,6 +245,17 @@ def _match_rank(player: models.MatchedPlayer) -> int:
     return 2
 
 
+def resolve_recorder_identity(detail: Any) -> tuple:
+    """录像者身份（dbid 优先、昵称兜底），与 ``resolve_recorder_team`` 同源。
+
+    返回 ``(recorder_dbid, recorder_name)``；detail 为空时返回 ``(None, None)``。
+    界面「本人行」高亮与绿方分组共用这套身份数据。
+    """
+    if detail is None:
+        return None, None
+    return getattr(detail, "recorder_dbid", None), getattr(detail, "recorder_name", None)
+
+
 def resolve_recorder_team(detail: Any, players: Optional[list] = None) -> Optional[int]:
     """反查录像者本人所在队（绿方）。
 
@@ -255,8 +266,7 @@ def resolve_recorder_team(detail: Any, players: Optional[list] = None) -> Option
     rows = list(players if players is not None else (getattr(detail, "players", None) or []))
     if detail is None:
         return None
-    recorder_dbid = getattr(detail, "recorder_dbid", None)
-    recorder_name = getattr(detail, "recorder_name", None)
+    recorder_dbid, recorder_name = resolve_recorder_identity(detail)
     if recorder_dbid is not None:
         for player in rows:
             dbid = getattr(player, "dbid", None)
@@ -363,6 +373,8 @@ class PlayerTableModel(QAbstractTableModel):
         self._sort_chain = tuple(DEFAULT_SORT_CHAIN)
         self._user_sorted = False
         self._recorder_team: Optional[int] = None
+        self._recorder_dbid: Any = None
+        self._recorder_name: Any = None
 
     # ------------------------------------------------------------ Qt 接口
     def rowCount(self, parent: Any = None) -> int:  # noqa: N802 - Qt 命名
@@ -399,6 +411,9 @@ class PlayerTableModel(QAbstractTableModel):
         font_role = Qt.ItemDataRole.FontRole if Qt is not None else 11
         alignment_role = Qt.ItemDataRole.TextAlignmentRole if Qt is not None else 7
 
+        if role == tooltip_role:
+            # 第二轮用户反馈：查询结果区域（含所有列）一律不提供鼠标悬停提示。
+            return ""
         if entry[0] == "group":
             return self._group_data(entry, column, role,
                                     display_role, background_role, foreground_role,
@@ -407,8 +422,6 @@ class PlayerTableModel(QAbstractTableModel):
         key = COLUMNS[column]["key"]
         if role == display_role:
             return self._display_value(player, key)
-        if role == tooltip_role:
-            return self._tooltip(player, key)
         if role == background_role:
             return self._background(player)
         if role == foreground_role:
@@ -460,10 +473,11 @@ class PlayerTableModel(QAbstractTableModel):
     # ------------------------------------------------------------ 数据填充
     def set_rows(self, rows: list, replay: Any = None,
                  recorder_team: Optional[int] = None) -> None:
-        """替换全部玩家行；``replay`` 用于反查录像者所在队并做红绿分组。"""
+        """替换全部玩家行；``replay`` 用于反查录像者身份 / 所在队并做红绿分组。"""
         self._all_rows = list(rows or [])
         self._user_sorted = False
         self._sort_chain = tuple(DEFAULT_SORT_CHAIN)
+        self._recorder_dbid, self._recorder_name = resolve_recorder_identity(replay)
         if recorder_team is not None:
             self._recorder_team = int(recorder_team)
         else:
@@ -513,6 +527,27 @@ class PlayerTableModel(QAbstractTableModel):
     def recorder_team(self) -> Optional[int]:
         """录像者本人所在队（绿方）；无法识别时返回 None。"""
         return self._recorder_team
+
+    def recorder_identity(self) -> tuple:
+        """录像者身份 ``(dbid, name)``（与绿方分组 / 本人行高亮同源）。"""
+        return self._recorder_dbid, self._recorder_name
+
+    def is_recorder(self, player: Any) -> bool:
+        """该玩家是否录像者本人（dbid 优先、昵称兜底；与绿方分组同源）。"""
+        if player is None:
+            return False
+        dbid = getattr(player, "dbid", None)
+        if self._recorder_dbid is not None and dbid is not None:
+            try:
+                return int(dbid) == int(self._recorder_dbid)
+            except (TypeError, ValueError):
+                return False
+        name = getattr(player, "nickname", None)
+        return bool(self._recorder_name) and name == self._recorder_name
+
+    def is_recorder_row(self, row: int) -> bool:
+        """该模型行是否为录像者本人（组头行返回 False）。"""
+        return self.is_recorder(self.row_object(row))
 
     def is_group_row(self, row: int) -> bool:
         """该模型行是否为组头行。"""
@@ -677,56 +712,36 @@ class PlayerTableModel(QAbstractTableModel):
             return _format_number(_stat_value(stats, key))
         return "—"
 
-    def _tooltip(self, player: models.MatchedPlayer, key: str) -> str:
-        if key == "match_type":
-            return TOOLTIPS.get(match_label(player), "")
-        if key == "vehicle":
-            stats = self._stats_map.get(_stats_key(player))
-            code = vehicle_code(player, stats)
-            name = vehicle_display(player, stats)
-            if code and code != name:
-                return "车型：%s（代码 %s）" % (name, code)
-            return "车型：%s" % name
-        if key in STATS_KEYS:
-            if self._stats_state == STATS_STATE_LOADING:
-                return "正在加载当局战绩…"
-            if self._stats_state == STATS_STATE_UNAVAILABLE:
-                return self._stats_message or "当局战绩不可用"
-            return "数据来自偶游盒子 battledetail，仅供参考、非官方数据"
-        if key == "dbid":
-            return "账号 ID（完整录像 dbid）；partial 录像无账号 ID"
-        if key == "ban_count":
-            return "1 次 = 黄标，2 次及以上 = 红标；同一玩家跨批次记录已归集"
-        if key == "reason":
-            return ((player.records[0].reason or "") if player.records else "") or "未命中封禁名单"
-        if key == "duration":
-            return ((player.records[0].duration or "") if player.records else "") or "未命中封禁名单"
-        if key == "latest_ban_day":
-            return (player.latest_ban_day or "") or "未命中封禁名单"
-        if key == "nickname":
-            return "%s（昵称匹配口径：同昵称视为同一人，A2）" % (player.nickname or "—")
-        if key == "clan_abbrev":
-            return "军团缩写：%s" % (player.clan_abbrev or "—")
-        return ""
-
     def _background(self, player: models.MatchedPlayer) -> Any:
         if QColor is None:
             return None
+        # 封禁黄 / 红标底色优先级最高（本人行高亮不得盖掉封禁标色）。
         if player.level == models.LEVEL_RED:
-            return QColor("#ffd9d9")
+            return QColor(theme.COLOR_RED_BG)
         if player.level == models.LEVEL_YELLOW:
-            return QColor("#fff3c4")
+            return QColor(theme.COLOR_YELLOW_BG)
+        # 本人（录像者）行：复用主题既有浅蓝，非封禁行才显示。
+        if self.is_recorder(player):
+            return QColor(theme.COLOR_RECORDER_BG)
         return None
 
     def _foreground(self, player: models.MatchedPlayer, key: str) -> Any:
         if QColor is None or not player.is_hit:
             return None
         if key in ("ban_count", "match_type"):
-            return QColor("#b91c1c") if player.level == models.LEVEL_RED else QColor("#92400e")
+            return QColor(theme.COLOR_RED_TEXT) if player.level == models.LEVEL_RED \
+                else QColor(theme.COLOR_YELLOW_TEXT)
         return None
 
     def _font(self, player: models.MatchedPlayer, key: str) -> Any:
-        if QFont is None or not player.is_hit:
+        if QFont is None:
+            return None
+        # 本人行昵称加粗（与封禁命中的加粗逻辑并存）。
+        if key == "nickname" and self.is_recorder(player):
+            font = QFont()
+            font.setBold(True)
+            return font
+        if not player.is_hit:
             return None
         if key in ("ban_count", "match_type"):
             font = QFont()

@@ -29,6 +29,10 @@ COLOR_RED_TEXT = "#b91c1c"
 COLOR_YELLOW_TEXT = "#92400e"
 COLOR_TEXT = "#1f2937"
 COLOR_MUTED = "#6b7280"
+# 本人（录像者）行浅蓝底：复用 QSS 中 Badge[kind="complete"] 的既有浅蓝，不新增颜色。
+COLOR_RECORDER_BG = "#e0f2fe"
+# 主色（与 Primary 按钮 / 进度条同色）；用于选中行半透明叠加。
+COLOR_ACCENT = "#2563eb"
 
 # 固定免责声明（A4/M5：不可省，历史封禁 ≠ 当前开挂）。
 DISCLAIMER_TEXT = (
@@ -240,6 +244,9 @@ QTableView {
 /* 结果表：24 列 + 30/60 人，压缩字体 / 行高 / 内边距保证一屏 30 人（需求 6） */
 QTableView#ResultTable {
     font-size: 7.5pt;
+    /* 选中行由 ResultRowDelegate 叠加半透明蓝（不盖掉封禁黄/红与本人浅蓝底色，第二轮反馈）。 */
+    selection-background-color: transparent;
+    selection-color: #111827;
 }
 QTableView#ResultTable QWidget {
     font-size: 7.5pt;

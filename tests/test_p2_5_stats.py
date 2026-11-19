@@ -1221,6 +1221,120 @@ def test_service_peek_player_stats_cache_zero_network(tmp_path):
         service.dispose()
 
 
+class FakePlayerStatsClient:
+    """假盒子客户端：记录 get_player_stats 调用参数并返回预设 PlayerStats（零网络）。"""
+
+    def __init__(self, result=None):
+        self.result = result
+        self.calls = []
+        self.request_count = 0
+
+    def get_player_stats(self, account_id=None, nickname=None, force_refresh=False):
+        self.calls.append({"account_id": account_id, "nickname": nickname,
+                           "force_refresh": force_refresh})
+        self.request_count += 1
+        return self.result
+
+
+def test_service_get_player_stats_unmatched_player_with_dbid(tmp_path):
+    """未命中封禁名单的玩家（有 dbid）也可点查综合战绩（不再 is_hit 硬拦截）。"""
+    service = _make_real_service(tmp_path)
+    matched = models.MatchedPlayer(nickname="路人甲", dbid=7048141181,
+                                   match_type=models.MATCH_TYPE_NONE)
+    stats = models.PlayerStats(account_id=7048141181, source="box_index",
+                               combat_power=1376, win_rate=56)
+    fake = FakePlayerStatsClient(result=stats)
+    service._make_box_client = lambda module, kwargs: fake
+    try:
+        result = service.get_player_stats(matched)
+        assert result.available is True
+        assert result.stats.combat_power == 1376
+        assert fake.calls == [{"account_id": 7048141181, "nickname": "路人甲",
+                               "force_refresh": False}]
+    finally:
+        service.dispose()
+
+
+def test_service_get_player_stats_partial_by_nickname(tmp_path):
+    """partial 局无 dbid：按昵称（pn）查询综合战绩。"""
+    service = _make_real_service(tmp_path)
+    matched = models.MatchedPlayer(nickname="队友甲", dbid=None, partial=True,
+                                   match_type=models.MATCH_TYPE_NICKNAME)
+    stats = models.PlayerStats(account_id=999999, source="box_index", combat_power=900)
+    fake = FakePlayerStatsClient(result=stats)
+    service._make_box_client = lambda module, kwargs: fake
+    try:
+        result = service.get_player_stats(matched)
+        assert result.available is True
+        assert fake.calls[0]["account_id"] is None
+        assert fake.calls[0]["nickname"] == "队友甲"
+        assert "按昵称查询" in result.message
+    finally:
+        service.dispose()
+
+
+def test_service_get_player_stats_missing_identity(tmp_path):
+    """无 dbid 且无昵称：返回中文错误，且不构造客户端、不发请求。"""
+    service = _make_real_service(tmp_path)
+    matched = models.MatchedPlayer(nickname="", dbid=None, match_type=models.MATCH_TYPE_NONE)
+    called = {"value": False}
+
+    def fake_make(module, kwargs):
+        called["value"] = True
+        raise AssertionError("不应构造盒子客户端")
+
+    service._make_box_client = fake_make
+    try:
+        result = service.get_player_stats(matched)
+        assert result.available is False
+        assert "缺少账号信息" in result.message
+        assert called["value"] is False
+    finally:
+        service.dispose()
+
+
+def test_service_get_player_stats_mock_allows_unmatched(tmp_path):
+    """mock 分支同步放开：未命中玩家 / partial 仅昵称都可返回演示战绩。"""
+    from src.app.service import AppService
+
+    cfg = Config(project_root=tmp_path, db_path=Path(tmp_path) / "mock.db")
+    service = AppService(cfg=cfg, mock=True)
+    try:
+        unmatched = models.MatchedPlayer(nickname="路人甲", dbid=7048141181,
+                                         match_type=models.MATCH_TYPE_NONE)
+        assert service.get_player_stats(unmatched).available is True
+        partial = models.MatchedPlayer(nickname="队友甲", dbid=None, partial=True)
+        assert service.get_player_stats(partial).available is True
+        missing = models.MatchedPlayer(nickname="", dbid=None)
+        missing_result = service.get_player_stats(missing)
+        assert missing_result.available is False
+        assert "缺少账号信息" in missing_result.message
+    finally:
+        service.dispose()
+
+
+def test_service_peek_player_stats_cache_unmatched_player(tmp_path):
+    """未命中玩家只要有 dbid 且有缓存，peek 也能返回（零网络）。"""
+    service = _make_real_service(tmp_path)
+    matched = models.MatchedPlayer(nickname="路人甲", dbid=7048141181,
+                                   match_type=models.MATCH_TYPE_NONE)
+    try:
+        assert service.peek_player_stats_cache(matched) is None
+        conn = service._thread_conn()
+        conn.execute(
+            "INSERT INTO player_stats(account_id, source, fetched_at, update_time, "
+            "combat_power, win_rate, avg_damage, battles_hint) VALUES(?, 'box_index', ?, "
+            "'2026-11-15 06:35', 1376, 56, 2614, 1500)",
+            (7048141181, datetime.now().astimezone().isoformat(timespec="seconds")))
+        conn.commit()
+        result = service.peek_player_stats_cache(matched)
+        assert result is not None and result.available is True
+        assert result.stats.combat_power == 1376
+        assert "盒子缓存于" in result.message
+    finally:
+        service.dispose()
+
+
 # ---------------------------------------------------------------- DB 幂等迁移
 def test_db_idempotent_migration_legacy_v1(tmp_path):
     """旧库（schema_version=1）幂等迁移：补 v2 新表，既有数据一条不丢。"""
