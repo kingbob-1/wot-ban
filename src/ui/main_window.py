@@ -1450,16 +1450,21 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, title, message)
 
     def auto_start(self) -> None:
-        """窗口显示后的自动动作：刷新数据状态 + 探测本机环境（无需点击）+ 扫描 + A1 检查。"""
+        """窗口显示后的自动动作：刷新数据状态 + 探测本机环境（无需点击）+ 全量扫描录像 + A1 检查。
+
+        1.0.1：启动默认扫描改为「全部录像」（mode="all"），不再只扫最近 7 天窗口，
+        扫描完成后 `_on_scan_finished(mode="all")` 选中列表第 1 个（最新一局）并自动查询；
+        用户手动点「最新完整录像」/ 重新检测等其他触发仍保持 latest 逻辑。
+        """
         self._refresh_data_status()
         self._env_seq += 1
         env = self.service.detect_environment(apply=True)
         self._apply_environment(env)
         if self.service.replay_dir_available():
-            self.start_scan("latest")
+            self.start_scan("all")
         if QTimer is not None:
-            # 启动检查延后 3 秒，让首次录像扫描先完成，避免两个 worker 同时打开 SQLite。
-            QTimer.singleShot(3000, partial(self._start_update_check, True, False))
+            # 延后 15 秒，等全量扫描（约 10s）结束后再做名单更新检查，避免与扫描并发写 SQLite。
+            QTimer.singleShot(15000, partial(self._start_update_check, True, False))
 
     def start_environment_detect(self, then_scan: bool = True) -> None:
         """后台探测本机环境（游戏目录 / 我的账号），完成后刷新按钮提示与录像区。"""

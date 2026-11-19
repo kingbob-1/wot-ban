@@ -20,8 +20,11 @@
   11) 综合战绩只剩标题行右上角单个「刷新」按钮（force=True），非命中玩家也可点；
   12) 「当前对局」文案与下拉条目补本人本局车名（只显示名称、绝不显示代码）。
 - **第三轮 1.0 定稿 UI 精简**（task-10）：
-  13) 「最近 7 天」「数据状态」按钮移除、录像区扫描入口只剩 3 个、版本号 1.0.0；
+  13) 「最近 7 天」「数据状态」按钮移除、录像区扫描入口只剩 3 个、版本号定稿；
       DataStatusDialog / open_data_status() / get_data_status() 保留可用。
+- **1.0.1 启动自动扫描**（task-14）：
+  14) auto_start 自动扫描改为「全部录像」（mode="all"，不再仅最近 7 天窗口的 latest），
+      扫描完成后选中最新一局（index 0）；其他触发（重新检测）仍保持 latest。版本号 1.0.1。
 """
 import os
 import sys
@@ -1288,12 +1291,12 @@ def test_application_version_from_config(qapp):
 
 
 def test_round3_final_ui_trim(qapp):
-    """第三轮 1.0 定稿：「最近 7 天」「数据状态」按钮移除，扫描入口 3 个，版本 1.0.0。"""
+    """第三轮 1.0 定稿：「最近 7 天」「数据状态」按钮移除，扫描入口 3 个，版本 1.0.1。"""
     from src.ui.main_window import SCAN_MODE_LABELS, MainWindow
     from src.ui.widgets import DataStatusDialog
 
-    # 1) 版本号定稿 1.0.0（配置唯一真源）
-    assert load_config().app_version == "1.0.0"
+    # 1) 版本号定稿 1.0.1（配置唯一真源；1.0.0 起的定稿版本串）
+    assert load_config().app_version == "1.0.1"
 
     service = make_mock_service()
     window = MainWindow(service)
@@ -1301,11 +1304,11 @@ def test_round3_final_ui_trim(qapp):
     window.show()
     try:
         settle(qapp)
-        # 2) 窗口标题与顶栏版本标签显示 v1.0.0
-        assert window.windowTitle().endswith("v1.0.0"), window.windowTitle()
+        # 2) 窗口标题与顶栏版本标签显示 v1.0.1
+        assert window.windowTitle().endswith("v1.0.1"), window.windowTitle()
         version_labels = [label.text() for label in window.findChildren(QLabel)
                           if label.objectName() == "SubTitle"]
-        assert version_labels == ["v1.0.0"], version_labels
+        assert version_labels == ["v1.0.1"], version_labels
 
         # 3) 两个按钮彻底移除：属性不存在，且全窗口按钮文案里也不存在
         assert not hasattr(window, "scan_recent_button")
@@ -1342,6 +1345,43 @@ def test_round3_final_ui_trim(qapp):
         qapp.processEvents()
         dialog.close()
         assert window._data_status is not None
+    finally:
+        window.close()
+        service.dispose()
+
+
+def test_auto_start_scans_all_replays_and_selects_newest(qapp, monkeypatch):
+    """1.0.1：启动自动扫描「全部录像」（mode="all"），完成后选中最新一局（index 0）。
+
+    用户反馈：删了「最近 7 天」按钮后界面自动加载的仍是近 7 天窗口内的 latest；
+    改为 all 后最新一局（本机 2026-11-15 01:08 partial）会排在列表第 1 个并被自动查询。
+    其他触发（重新检测）保持原 latest 逻辑。
+    """
+    from src.app import mock_data
+    from src.ui.main_window import MainWindow
+
+    service = make_mock_service()
+    window = MainWindow(service)
+    window.show()
+    try:
+        settle(qapp)
+        scan_modes = []
+        monkeypatch.setattr(window, "start_scan",
+                            lambda mode="latest": scan_modes.append(mode))
+        # 启动自动动作：扫描全部录像
+        window.auto_start()
+        assert scan_modes == ["all"], scan_modes
+        # 其他触发保持原逻辑：重新检测仍扫描「最新完整录像」（latest）
+        window._on_redetect_environment_clicked()
+        assert scan_modes == ["all", "latest"], scan_modes
+        # 模拟 all 扫描完成：target_index=0（最新一局），回填下拉并自动查询该局
+        replays = mock_data.build_replays()
+        window._on_scan_finished("all", replays)
+        assert window.replay_combo.currentIndex() == 0
+        assert window.replay_combo.itemData(0) == replays[0].path
+        assert window._current_replays[0].path == replays[0].path
+        assert window._current_replay is not None
+        assert window._current_replay.path == replays[0].path
     finally:
         window.close()
         service.dispose()

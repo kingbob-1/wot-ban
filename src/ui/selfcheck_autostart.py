@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""启动自动扫描验收自检（v0.2 / T19）：offscreen 真实环境，不点击任何按钮。
+"""启动自动扫描验收自检（v0.2 / T19；1.0.1 起默认扫描「全部录像」）：offscreen 真实环境，不点击任何按钮。
 
 验收目标
 --------
-- 启动后 **≤15 秒**结果表出现行（自启动默认扫描「最新完整录像」，本机约 109 局 / 100+）；
-- 「重新检测」后再次扫描正常；
+- 启动后结果表出现行（自启动默认扫描「全部录像」，本机 12,851 个录像增量扫描约 9 秒、
+  从 auto_start 到结果表出行约 11 秒，见 DEADLINE_SECONDS 余量说明）；
+- 「重新检测」后再次扫描正常（该触发仍按原逻辑扫描「最新完整录像」）；
 - 连续第二次启动窗口同样正常；
 - 进程退出码 0（Qt 退出防护）。
 
@@ -34,7 +35,9 @@ from src.app.service import AppService  # noqa: E402
 from src.config import load_config  # noqa: E402
 from src.ui.main_window import MainWindow, create_application  # noqa: E402
 
-DEADLINE_SECONDS = 15.0
+# 1.0.1：启动默认扫描「全部录像」（12,851 个，增量扫描本机实测约 9 秒；
+# 从 auto_start 到结果表出行约 11 秒）。上限留足 60 秒，避免磁盘缓存冷/机器繁忙时误报失败。
+DEADLINE_SECONDS = 60.0
 
 
 def wait_for_rows(app, window, timeout_s: float = DEADLINE_SECONDS) -> float:

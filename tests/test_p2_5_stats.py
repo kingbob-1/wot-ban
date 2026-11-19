@@ -431,9 +431,12 @@ def test_player_stats_same_day_boundary(tmp_path):
         yesterday_late = (now - timedelta(days=1)).replace(hour=23, minute=59, second=0, microsecond=0)
         assert client._player_stats_cache_fresh(yesterday_late, now) is False
         assert client._player_stats_cache_fresh(None, now) is False
-        # 旧口径（按小时 TTL）可通过配置关闭自然日模式，保持向后兼容
+        # 旧口径（按小时 TTL）可通过配置关闭自然日模式，保持向后兼容；
+        # 用「1 小时前」构造缓存时间：TTL=18h 内恒命中，不依赖测试运行时刻
+        # （原写法用「今天 00:01」，在本地 18:01–24:00 区间必超 18h 而 flake）。
         client.config.player_stats_cache_by_day = False
-        assert client._player_stats_cache_fresh(today_early, now) is True
+        recent = now - timedelta(hours=1)
+        assert client._player_stats_cache_fresh(recent, now) is True
         assert client._player_stats_cache_fresh(now - timedelta(hours=19), now) is False
     finally:
         conn.close()
