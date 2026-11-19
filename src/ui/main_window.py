@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """主窗口：P3 MVP 界面骨架（顶栏 / 录像区 / 结果表 / 明细 / 汇总 / 免责声明）。
 
-界面全部代码构建（无 .ui 文件）。窗口 16:9 可缩放，默认尺寸按屏幕可用区域计算
-（4K 下自动放大到约 2240×1260，仍保持 16:9）；字体微软雅黑、高 DPI 由 Qt 处理。
+界面全部代码构建（无 .ui 文件）。窗口 16:9 可缩放，默认 1920×1080（屏幕可用区域
+不足时等比收缩）；字体微软雅黑、高 DPI 由 Qt 处理。顶栏只保留标题、版本与操作按钮，
+名单库版本信息与本机环境路径改在「数据状态」页查看。
 
 线程模型
 --------
@@ -19,7 +20,7 @@ from typing import Any, Optional
 
 try:
     from PySide6.QtCore import Qt, QTimer, QUrl
-    from PySide6.QtGui import QDesktopServices, QGuiApplication
+    from PySide6.QtGui import QDesktopServices, QGuiApplication, QIcon
     from PySide6.QtWidgets import (
         QAbstractItemView,
         QApplication,
@@ -43,14 +44,13 @@ try:
     )
 except ImportError:  # 便于无 PySide6 环境下静态检查
     Qt = QApplication = QMainWindow = QWidget = QFrame = object  # type: ignore[assignment]
-    QTimer = QUrl = QDesktopServices = None  # type: ignore[assignment]
+    QTimer = QUrl = QDesktopServices = QIcon = None  # type: ignore[assignment]
 
 try:
     from .. import models
     from ..app.service import (
         AppService,
         ServiceError,
-        format_iso_text,
         latest_complete_replay,
         replay_label,
     )
@@ -71,7 +71,6 @@ except ImportError:  # 直接以脚本方式运行时的兜底
     from src.app.service import (
         AppService,
         ServiceError,
-        format_iso_text,
         latest_complete_replay,
         replay_label,
     )
@@ -89,6 +88,15 @@ except ImportError:  # 直接以脚本方式运行时的兜底
 
 SCAN_MODE_LABELS = {"latest": "最新完整录像", "recent": "最近 7 天", "all": "全部录像", "file": "手动选择"}
 
+# 窗口默认 / 最小尺寸（16:9）。默认 1920×1080；屏幕可用区域不足时等比收缩。
+DEFAULT_WINDOW_WIDTH = 1920
+DEFAULT_WINDOW_HEIGHT = 1080
+MIN_WINDOW_WIDTH = 1280
+MIN_WINDOW_HEIGHT = 720
+
+# Windows 任务栏按 AppUserModelID 分组：显式声明后任务栏 / 托盘才显示本项目图标。
+APP_USER_MODEL_ID = "kingbob.wot-ban.tank-ban-lookup"
+
 # 窗口持有的后台 worker 属性名：worker 结束后统一置 None，避免访问已 deleteLater 的 C++ 对象。
 WORKER_ATTR_NAMES = (
     "_scan_worker",
@@ -101,8 +109,44 @@ WORKER_ATTR_NAMES = (
 )
 
 
+def application_icon_path(cfg: Any = None) -> Optional[Path]:
+    """定位 assets/app.ico（与 exe 使用同一张原创坦克剪影图标）。"""
+    candidates = []
+    root = getattr(cfg, "project_root", None)
+    if root:
+        candidates.append(Path(root) / "assets" / "app.ico")
+    candidates.append(Path(__file__).resolve().parents[2] / "assets" / "app.ico")
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def apply_application_icon(app: Any, cfg: Any = None) -> None:
+    """设置窗口 / 任务栏 / 托盘图标，并声明 AppUserModelID（Windows）。
+
+    图标与 ``坦克世界封号查询.exe`` 使用同一张 ``assets/app.ico``：未设置时 Qt 窗口
+    在任务栏/托盘会显示系统占位图标。
+    """
+    if app is None:
+        return
+    if QIcon is not None:
+        path = application_icon_path(cfg)
+        if path is not None:
+            icon = QIcon(str(path))
+            if not icon.isNull():
+                app.setWindowIcon(icon)
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+        except Exception:  # noqa: BLE001 - 非图形环境 / API 不可用时不影响启动
+            pass
+
+
 def create_application(argv: Optional[list] = None) -> Any:
-    """创建 / 复用 QApplication，并应用主题与高 DPI 策略。"""
+    """创建 / 复用 QApplication，并应用主题、图标与高 DPI 策略。"""
     if QGuiApplication is not None and hasattr(QGuiApplication, "setHighDpiScaleFactorRoundingPolicy"):
         try:
             QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
@@ -111,6 +155,7 @@ def create_application(argv: Optional[list] = None) -> Any:
         except Exception:  # noqa: BLE001 - 高 DPI 策略设置失败不影响启动
             pass
     app = QApplication.instance() or QApplication(argv if argv is not None else sys.argv)
+    cfg = None
     try:
         from ..config import load_config
     except ImportError:  # 直接以脚本方式运行时的兜底
@@ -122,26 +167,23 @@ def create_application(argv: Optional[list] = None) -> Any:
     except Exception:  # noqa: BLE001 - 配置不可用时退回默认名称，不阻断启动
         app.setApplicationName("坦克世界封号案底查询工具")
     theme.configure_application(app)
+    apply_application_icon(app, cfg)
     return app
 
 
 def default_window_size() -> tuple:
-    """按屏幕可用区域计算 16:9 默认窗口尺寸（4K 下放大，最小 1280×720）。"""
-    width = 1600
+    """默认 1920×1080（16:9）；屏幕可用区域不足时等比收缩。"""
+    width, height = DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT
     screen = QApplication.primaryScreen()
     if screen is not None:
         available = screen.availableGeometry()
-        if available.width() >= 2560:
-            width = 2240
-        elif available.width() >= 1920:
-            width = 1920
-        width = max(1280, min(width, int(available.width() * 0.94)))
-        height = int(round(width * 9.0 / 16.0))
-        if height > available.height() * 0.94:
+        if width > int(available.width() * 0.94):
+            width = int(available.width() * 0.94)
+            height = int(round(width * 9.0 / 16.0))
+        if height > int(available.height() * 0.94):
             height = int(available.height() * 0.94)
             width = int(round(height * 16.0 / 9.0))
-        return width, height
-    return width, 900
+    return width, height
 
 
 class MainWindow(QMainWindow):
@@ -191,84 +233,38 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("就绪：正在准备界面…")
 
     def _build_header(self) -> Any:
+        """顶栏（单行）：标题 + 版本 + 操作按钮。
+
+        v0.3 精简：原先的「数据更新 / 名单规模 / wgid 覆盖 / 缺失批次 / 上次检查」
+        元信息行、「本地真实数据」徽标与「本机环境」路径信息行全部移除；名单库版本
+        信息统一在「数据状态」页查看，本机环境路径只保留在按钮 tooltip 与状态页。
+        """
         header = QFrame()
         header.setObjectName("Header")
-        layout = QVBoxLayout(header)
-        layout.setContentsMargins(18, 10, 18, 8)
-        layout.setSpacing(6)
+        layout = QHBoxLayout(header)
+        layout.setContentsMargins(18, 10, 18, 10)
+        layout.setSpacing(10)
 
-        top_row = QHBoxLayout()
-        top_row.setSpacing(10)
         title = QLabel(self.service.cfg.app_name)
         title.setObjectName("Title")
         version = QLabel("v%s" % self.service.cfg.app_version)
         version.setObjectName("SubTitle")
-        self.mode_badge = theme.make_badge(self.service.mode_label, "mock" if self.service.is_mock else "real")
-        top_row.addWidget(title)
-        top_row.addWidget(version)
-        top_row.addWidget(self.mode_badge)
-        top_row.addStretch(1)
-        self.data_status_button = QPushButton("数据状态")
-        self.data_status_button.setToolTip("查看名单库批次数 / 条数 / 更新时间 / wgid 覆盖 / 缺失批次")
-        self.update_button = QPushButton("更新名单")
-        self.update_button.setObjectName("Primary")
-        self.update_button.setToolTip("检查官方名单接口并增量更新（启动时自动检查一次，运行期每 6 小时）")
-        top_row.addWidget(self.data_status_button)
-        top_row.addWidget(self.update_button)
-        layout.addLayout(top_row)
-
-        meta_row = QHBoxLayout()
-        meta_row.setSpacing(8)
-        self.meta_labels = {}
-        meta_items = [
-            ("update", "数据更新"),
-            ("count", "名单规模"),
-            ("wgid", "wgid 覆盖"),
-            ("missing", "缺失批次"),
-            ("check", "上次检查"),
-        ]
-        for index, (key, name) in enumerate(meta_items):
-            if index:
-                separator = QLabel("·")
-                separator.setObjectName("MetaHint")
-                meta_row.addWidget(separator)
-            name_label = QLabel(name)
-            name_label.setObjectName("FieldName")
-            value_label = QLabel("—")
-            value_label.setObjectName("MetaValue")
-            self.meta_labels[key] = value_label
-            meta_row.addWidget(name_label)
-            meta_row.addWidget(value_label)
-        meta_row.addSpacing(16)
-        self.mode_hint = QLabel(self.service.mode_message())
-        self.mode_hint.setObjectName("MetaHint")
-        self.mode_hint.setWordWrap(True)
-        meta_row.addWidget(self.mode_hint, 1)
-        layout.addLayout(meta_row)
-
-        # v0.2：本机环境（启动即探测显示，无需点击）
-        env_row = QHBoxLayout()
-        env_row.setSpacing(10)
-        env_title = QLabel("本机环境")
-        env_title.setObjectName("FieldName")
-        env_row.addWidget(env_title)
-        self.env_game_label = QLabel("游戏目录：检测中…")
-        self.env_game_label.setObjectName("MetaValue")
-        self.env_account_label = QLabel("我的账号：检测中…")
-        self.env_account_label.setObjectName("MetaValue")
-        self.env_source_label = QLabel("")
-        self.env_source_label.setObjectName("MetaHint")
+        layout.addWidget(title)
+        layout.addWidget(version)
+        layout.addStretch(1)
         self.redetect_button = QPushButton("重新检测")
         self.redetect_button.setObjectName("Ghost")
         self.redetect_button.setToolTip("重新探测游戏安装目录与我的账号（注册表卸载项 + 最新录像 meta）")
         self.manual_game_button = QPushButton("手动选择游戏目录")
         self.manual_game_button.setToolTip("手动指定《坦克世界》安装目录，选择后保存到 config.local.json")
-        env_row.addWidget(self.env_game_label)
-        env_row.addWidget(self.env_account_label)
-        env_row.addWidget(self.env_source_label, 1)
-        env_row.addWidget(self.redetect_button)
-        env_row.addWidget(self.manual_game_button)
-        layout.addLayout(env_row)
+        self.data_status_button = QPushButton("数据状态")
+        self.data_status_button.setToolTip("查看名单库批次数 / 条数 / 更新时间 / wgid 覆盖 / 缺失批次")
+        self.update_button = QPushButton("更新名单")
+        self.update_button.setObjectName("Primary")
+        self.update_button.setToolTip("检查官方名单接口并增量更新（启动时自动检查一次，运行期每 6 小时）")
+        for button in (self.redetect_button, self.manual_game_button,
+                       self.data_status_button, self.update_button):
+            layout.addWidget(button)
         return header
 
     def _build_replay_bar(self) -> Any:
@@ -432,7 +428,7 @@ class MainWindow(QMainWindow):
     def _apply_window_geometry(self) -> None:
         width, height = default_window_size()
         self.resize(width, height)
-        self.setMinimumSize(1280, 720)
+        self.setMinimumSize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
         screen = QApplication.primaryScreen()
         if screen is not None:
             available = screen.availableGeometry()
@@ -537,38 +533,13 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ 数据状态
     def _refresh_data_status(self) -> None:
-        """读取名单库状态并刷新顶栏数据版本条。"""
+        """读取名单库状态（v0.3 起顶栏不再显示版本条，仅供状态页与提示使用）。"""
         try:
             status = self.service.get_data_status()
         except ServiceError as exc:
-            for label in self.meta_labels.values():
-                label.setText("—")
-            self.mode_hint.setText("读取名单库状态失败：%s" % exc)
             self.statusBar().showMessage("读取名单库状态失败：%s" % exc, 8000)
             return
         self._data_status = status
-        self.meta_labels["update"].setText(status.latest_batch_day or "—")
-        self.meta_labels["count"].setText("%s 条（去重入库）" % "{:,}".format(status.record_count))
-        self.meta_labels["count"].setToolTip(status.official_note or "库内条数（去重入库口径）")
-        self.meta_labels["wgid"].setText(status.wgid_coverage_text)
-        self.meta_labels["missing"].setText(status.missing_text)
-        self.meta_labels["check"].setText(format_iso_text(status.last_check_at))
-        if not status.available:
-            self.mode_hint.setText(status.message)
-        elif self.service.is_mock:
-            official_note = ("；" + status.official_note) if status.official_note else ""
-            self.mode_hint.setText(self.service.mode_message() + official_note)
-        else:
-            official_note = ("；" + status.official_note) if status.official_note else ""
-            replay_text = (
-                "；录像索引 %s 个" % "{:,}".format(status.replay_index_count)
-                if status.replay_index_count else ""
-            )
-            self.mode_hint.setText(
-                "名单库正常：去重入库 %s 条%s；wgid 覆盖 %s%s"
-                % ("{:,}".format(status.record_count), official_note,
-                   status.wgid_coverage_text, replay_text)
-            )
         self._refresh_status_dialog()
 
     def _on_data_status_clicked(self) -> None:
@@ -1027,7 +998,6 @@ class MainWindow(QMainWindow):
                 if getattr(player, "nickname", None):
                     stats_map[("nick", player.nickname)] = player
             self.model.set_stats(STATS_STATE_READY, stats_map, getattr(result, "message", ""))
-            self.detail_panel._set_battle_hint(getattr(result, "message", ""), "StatsHint")
         else:
             self._set_battle_unavailable(getattr(result, "message", "当局战绩不可用"))
         self._refresh_selected_detail()
@@ -1041,7 +1011,6 @@ class MainWindow(QMainWindow):
         self.model.set_stats(STATS_STATE_UNAVAILABLE, {}, message)
         self.statusBar().showMessage(message, 10000)
         self._refresh_selected_detail()
-        self.detail_panel._set_battle_hint("当局战绩不可用：%s" % message, "WarnHint")
 
     # ------------------------------------------------------------ 筛选 / 选中 / 汇总
     def _apply_filters(self) -> None:
@@ -1132,8 +1101,6 @@ class MainWindow(QMainWindow):
     def auto_start(self) -> None:
         """窗口显示后的自动动作：刷新数据状态 + 探测本机环境（无需点击）+ 扫描 + A1 检查。"""
         self._refresh_data_status()
-        self.env_game_label.setText("游戏目录：检测中…")
-        self.env_account_label.setText("我的账号：检测中…")
         self._env_seq += 1
         env = self.service.detect_environment(apply=True)
         self._apply_environment(env)
@@ -1144,7 +1111,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(3000, partial(self._start_update_check, True, False))
 
     def start_environment_detect(self, then_scan: bool = True) -> None:
-        """后台探测本机环境（游戏目录 / 我的账号），完成后刷新顶栏与录像区。"""
+        """后台探测本机环境（游戏目录 / 我的账号），完成后刷新按钮提示与录像区。"""
         self._env_seq += 1
         seq = self._env_seq
         fn = lambda progress, should_cancel: self.service.detect_environment(apply=True)  # noqa: E731
@@ -1155,15 +1122,26 @@ class MainWindow(QMainWindow):
         )
 
     def _apply_environment(self, env: Any) -> None:
-        """刷新顶栏环境标签 / 状态页环境区 / 录像区可用状态。"""
+        """刷新本机环境（v0.3：顶栏不再显示路径，仅更新按钮 tooltip 与状态页）。"""
         self._environment = env
         game_text = getattr(env, "game_dir_text", "未检测到游戏目录")
         account_text = getattr(env, "account_text", "未检测到账号")
-        self.env_game_label.setText("游戏目录：%s" % game_text)
-        self.env_account_label.setText("我的账号：%s" % account_text)
-        self.env_source_label.setText(getattr(env, "source_text", ""))
-        self.env_source_label.setToolTip(getattr(env, "message", "") or "")
-        self.env_game_label.setToolTip(getattr(env, "message", "") or game_text)
+        source_text = getattr(env, "source_text", "")
+        message = getattr(env, "message", "") or ""
+        env_lines = [line for line in (
+            "当前游戏目录：%s" % game_text,
+            "当前账号：%s" % account_text,
+            source_text,
+            message,
+        ) if line]
+        env_detail = "\n".join(env_lines)
+        self.redetect_button.setToolTip(
+            "重新探测游戏安装目录与我的账号（注册表卸载项 + 最新录像 meta）\n" + env_detail
+        )
+        self.manual_game_button.setToolTip(
+            "手动指定《坦克世界》安装目录，选择后保存到 config.local.json\n"
+            "当前游戏目录：%s" % game_text
+        )
         self._apply_replay_dir_state()
         self._refresh_status_dialog()
 
@@ -1193,17 +1171,13 @@ class MainWindow(QMainWindow):
     def _on_environment_failed(self, seq: int, message: str) -> None:
         if seq != self._env_seq:
             return
-        self.env_game_label.setText("游戏目录：检测失败")
-        self.env_account_label.setText("我的账号：检测失败")
-        self.env_source_label.setText(message)
+        self.redetect_button.setToolTip("环境检测失败：%s" % message)
         self.statusBar().showMessage(message, 10000)
         self._apply_replay_dir_state()
 
     def _on_redetect_environment_clicked(self) -> None:
         """「重新检测」：重新探测并刷新录像区（探测成功则自动扫描）。"""
         self.statusBar().showMessage("正在重新检测本机环境…", 5000)
-        self.env_game_label.setText("游戏目录：检测中…")
-        self.env_account_label.setText("我的账号：检测中…")
         self._env_seq += 1
         env = self.service.detect_environment(apply=True)
         self._apply_environment(env)
@@ -1289,7 +1263,7 @@ def run_app(cfg: Any, mock: bool = False) -> int:
 
     退出路径（Windows + PySide6 6.12 防崩溃）：
     ``app.exec()`` 返回 -> ``window.shutdown()``（停定时器/worker）-> ``service.dispose()``
-    -> 刷新日志；调用方 ``main.py`` 随后用 ``os._exit(0)`` 跳过解释器退出阶段的
+    -> 刷新日志；调用方 ``src/main.py`` 随后用 ``os._exit(0)`` 跳过解释器退出阶段的
     Qt 全局析构（实测偶发 Qt6Core.dll 0xc0000409 崩溃弹窗）。
     """
     app = create_application()

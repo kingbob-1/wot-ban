@@ -248,10 +248,6 @@ class PlayerDetailPanel(QWidget):
             self.battle_grid.addWidget(name_label, row, column)
             self.battle_grid.addWidget(value_label, row, column + 1)
         battle_layout.addLayout(self.battle_grid)
-        self.battle_hint = QLabel("打开完整录像且对局在 180 天内时自动加载；partial / 超期局不请求接口")
-        self.battle_hint.setObjectName("StatsHint")
-        self.battle_hint.setWordWrap(True)
-        battle_layout.addWidget(self.battle_hint)
         layout.addWidget(battle_card)
 
         # 综合战绩
@@ -291,13 +287,6 @@ class PlayerDetailPanel(QWidget):
             self.player_grid.addWidget(name_label, row, column)
             self.player_grid.addWidget(value_label, row, column + 1)
         player_layout.addLayout(self.player_grid)
-        self.player_hint = QLabel(
-            "点查口径：%s；点查受 ≥2 秒限流、缓存 12–24 小时" % PLAYER_STATS_SCOPE
-        )
-        self.player_hint.setObjectName("StatsHint")
-        self.player_hint.setWordWrap(True)
-        self.player_hint.setToolTip(PLAYER_STATS_SCOPE)
-        player_layout.addWidget(self.player_hint)
         layout.addWidget(player_card)
         layout.addStretch(1)
 
@@ -324,12 +313,6 @@ class PlayerDetailPanel(QWidget):
             label.setText("—")
         for label in self.player_values.values():
             label.setText("—")
-        self.battle_hint.setObjectName("StatsHint")
-        self.battle_hint.setText("打开完整录像且对局在 180 天内时自动加载；partial / 超期局不请求接口")
-        self.player_hint.setObjectName("StatsHint")
-        self.player_hint.setText(
-            "点查口径：%s；点查受 ≥2 秒限流、缓存 12–24 小时" % PLAYER_STATS_SCOPE
-        )
         self.player_stats_button.setEnabled(False)
         theme.set_badge(self.match_badge, "—", "none")
         theme.set_badge(self.level_badge, "未命中", "none")
@@ -345,7 +328,7 @@ class PlayerDetailPanel(QWidget):
         sub_parts.append("账号 ID：%s" % (player.dbid if player.dbid else "—（partial 录像无 ID）"))
         sub_parts.append("军团：%s" % (player.clan_abbrev or "—"))
         sub_parts.append("坦克：%s" % (player.tank or "—"))
-        sub_parts.append("阵营：%s" % ("蓝方" if player.team == 1 else ("红方" if player.team == 2 else "—")))
+        sub_parts.append("阵营：%s" % ("绿方" if player.team == 1 else ("红方" if player.team == 2 else "—")))
         self.sub_label.setText("　·　".join(sub_parts))
 
         label_text = match_label(player)
@@ -462,10 +445,6 @@ class PlayerDetailPanel(QWidget):
         if stats is None:
             for label in self.battle_values.values():
                 label.setText("…" if stats_state == "loading" else "—")
-            if stats_state == "loading":
-                self._set_battle_hint("正在加载当局战绩…", "LoadingHint")
-            else:
-                self._set_battle_hint(self._battle_message(stats_state), "WarnHint")
             return
         self.battle_values["combat"].setText(self._fmt(stats.combat))
         self.battle_values["damage"].setText(self._fmt(stats.damage))
@@ -478,48 +457,20 @@ class PlayerDetailPanel(QWidget):
         else:
             self.battle_values["hit_rate"].setText("—")
         self.battle_values["spotted"].setText(self._fmt(getattr(stats, "spotted", None)))
-        self._set_battle_hint(
-            "数据来自偶游盒子 battledetail（本局战力 ≠ 伤害），仅供参考、非官方数据", "StatsHint"
-        )
-
-    def _battle_message(self, stats_state: str) -> str:
-        if stats_state == "unavailable":
-            return "当局战绩不可用：partial 录像无 arena_id / 该局超出 180 天范围（详见表格列提示）"
-        return "打开完整录像且对局在 180 天内时自动加载"
-
-    def _set_battle_hint(self, text: str, object_name: str) -> None:
-        self.battle_hint.setObjectName(object_name)
-        self.battle_hint.setText(text)
-        self.battle_hint.style().unpolish(self.battle_hint)
-        self.battle_hint.style().polish(self.battle_hint)
 
     def _reset_player_stats(self) -> None:
         for label in self.player_values.values():
             label.setText("—")
-        self.player_hint.setObjectName("StatsHint")
-        self.player_hint.setText(
-            "点查口径：%s；点查受 ≥2 秒限流、缓存 12–24 小时" % PLAYER_STATS_SCOPE
-        )
-        self.player_hint.style().unpolish(self.player_hint)
-        self.player_hint.style().polish(self.player_hint)
 
     def set_player_stats_loading(self) -> None:
         """综合战绩请求中。"""
         for label in self.player_values.values():
             label.setText("…")
-        self.player_hint.setObjectName("LoadingHint")
-        self.player_hint.setText("正在请求偶游盒子 index（%s）…" % PLAYER_STATS_SCOPE)
-        self.player_hint.style().unpolish(self.player_hint)
-        self.player_hint.style().polish(self.player_hint)
 
     def show_player_stats(self, result: Any) -> None:
         """展示综合战绩结果（PlayerStatsResult）。"""
         if result is None or not getattr(result, "available", False):
             self._reset_player_stats()
-            self.player_hint.setObjectName("WarnHint")
-            self.player_hint.setText(getattr(result, "message", "综合战绩不可用"))
-            self.player_hint.style().unpolish(self.player_hint)
-            self.player_hint.style().polish(self.player_hint)
             return
         stats = result.stats
         self.player_values["combat_power"].setText(self._fmt(getattr(stats, "combat_power", None)))
@@ -527,16 +478,6 @@ class PlayerDetailPanel(QWidget):
         self.player_values["win_rate"].setText("%.1f%%" % float(win_rate) if win_rate is not None else "—")
         self.player_values["avg_damage"].setText(self._fmt(getattr(stats, "avg_damage", None)))
         self.player_values["battles_hint"].setText(self._fmt(getattr(stats, "battles_hint", None)))
-        self.player_hint.setObjectName("StatsHint")
-        self.player_hint.setText(
-            "%s；口径：%s；更新时间 %s；仅供参考、非官方数据" % (
-                getattr(result, "message", "数据来自偶游盒子 index"),
-                PLAYER_STATS_SCOPE,
-                format_iso_text(getattr(stats, "update_time", None)),
-            )
-        )
-        self.player_hint.style().unpolish(self.player_hint)
-        self.player_hint.style().polish(self.player_hint)
 
     def _fmt(self, value: Any) -> str:
         if value is None:

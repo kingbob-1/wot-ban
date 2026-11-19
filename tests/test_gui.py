@@ -163,10 +163,10 @@ def test_main_window_mock_flow(qapp):
     window.show()
     qapp.processEvents()
 
-    # 数据版本条：去重入库口径
-    assert "322,806" in window.meta_labels["count"].text()
-    assert "去重入库" in window.meta_labels["count"].text()
-    assert "322,941" in window.mode_hint.text()
+    # v0.3：顶栏不再显示数据版本条 / 模式徽标 / 本机环境路径（信息统一在「数据状态」页）
+    assert window._data_status is not None and window._data_status.record_count == 322806
+    assert not hasattr(window, "meta_labels") and not hasattr(window, "mode_hint")
+    assert not hasattr(window, "env_game_label") and not hasattr(window, "env_account_label")
 
     # A1：定时器间隔 = 配置 6 小时
     expected_ms = int(load_config().update_interval_hours * 3600 * 1000)
@@ -234,7 +234,8 @@ def test_main_window_mock_flow(qapp):
     # F4：综合战绩口径标注（偶游盒子 · 最近 1500 场标准局）
     assert "1500" in detail.player_title.text() and "偶游盒子" in detail.player_title.text()
     assert "1500" in detail.player_stats_button.toolTip()
-    assert "1500" in detail.player_hint.text()
+    # v0.3：明细面板不再显示「点击口径 / 来源 battledetail」提示行
+    assert not hasattr(detail, "player_hint") and not hasattr(detail, "battle_hint")
 
     # A1：手动触发一次「定时检查」（mock，静默不弹窗）
     window.trigger_scheduled_update()
@@ -304,16 +305,16 @@ def test_environment_auto_display_with_fake_detect(qapp, monkeypatch, tmp_path):
 
     from src.ui.main_window import MainWindow
 
-    # 1) mock 服务：合成环境（不依赖本机真实路径），启动即显示
+    # 1) mock 服务：合成环境（不依赖本机真实路径），启动即探测；v0.3 起路径只出现在按钮 tooltip
     service = make_mock_service()
     window = MainWindow(service)
     window.show()
     qapp.processEvents()
     window.auto_start()
-    assert wait_until(qapp, lambda: "检测中" not in window.env_game_label.text(), timeout_s=15)
-    assert "游戏目录：" in window.env_game_label.text()
-    assert "wot-ban-demo" in window.env_game_label.text()
-    assert "演示玩家" in window.env_account_label.text()
+    assert wait_until(qapp, lambda: window._environment is not None, timeout_s=15)
+    redetect_tip = window.redetect_button.toolTip()
+    assert "游戏目录" in redetect_tip and "wot-ban-demo" in redetect_tip
+    assert "演示玩家" in redetect_tip
     assert window.redetect_button.isEnabled() and window.manual_game_button.isEnabled()
     window.close()
     service.dispose()
@@ -385,8 +386,8 @@ def test_auto_start_real_mode_with_fake_scan(qapp, monkeypatch, tmp_path):
     window.auto_start()
     # 正确等待方式：processEvents + sleep（不能用 QTest.qWait 高频轮询）
     assert wait_until(qapp, lambda: window.model.rowCount() > 0, timeout_s=15), "auto_start 未出结果"
-    assert "FakeGame" in window.env_game_label.text()
-    assert "kingbob_" in window.env_account_label.text()
+    redetect_tip = window.redetect_button.toolTip()
+    assert "FakeGame" in redetect_tip and "kingbob_" in redetect_tip
     rows_first = window.model.rowCount()
     # 重新检测后再次扫描仍正常
     window._on_redetect_environment_clicked()

@@ -365,7 +365,7 @@ class PlayerTableModel(QAbstractTableModel):
 
     def _display_value(self, player: models.MatchedPlayer, key: str) -> str:
         if key == "team":
-            return "蓝方" if player.team == 1 else ("红方" if player.team == 2 else "—")
+            return "绿方" if player.team == 1 else ("红方" if player.team == 2 else "—")
         if key == "nickname":
             return player.nickname or "—"
         if key == "dbid":
